@@ -1,6 +1,14 @@
 # NEIN
 
-為指定版本的 LINE IPA 套用副裝置登入相容性與介面調整。
+NEIN 在德文中就是「不／不要（No）」的意思。
+
+名字取自這個雙關：對 LINE 裡不想要的東西說「NEIN」。
+
+除了副裝置登入相容性與介面調整之外，NEIN 也可以停用已分析的廣告 loader、隱藏廣告檢視，並封鎖已核對的廣告網域。
+
+> NEIN to ads. NEIN to unnecessary clutter.<br>
+> LINE, aber ohne Werbung. NEIN.
+
 
 ## 支援版本 📦
 
