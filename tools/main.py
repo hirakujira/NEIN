@@ -42,6 +42,15 @@ DEFAULT_ICON = 'design_simple_banana'
 AD_DOMAIN_LIST = ROOT / 'ad_domains.txt'
 PATCH_PROFILE_DIR = ROOT / 'patch_profiles'
 
+# LINE 26.14.0 (2026.828.1845), executable UUID
+# 0BAB483C-CA85-38CE-8984-0C20C92511E4. FriendTabViewModel initializes its
+# isSectionExpanded dictionary with only the friend case set to true. Set that
+# initial value to false in both dictionary insertion paths; later user-driven
+# updates remain unchanged.
+FRIEND_TAB_DEFAULT_EXPANDED_OFFSETS = (0x3392A18, 0x3392A28)
+FRIEND_TAB_DEFAULT_EXPANDED_ORIGINAL = bytes.fromhex('e8179f1a')  # cset w8, eq
+FRIEND_TAB_COLLAPSED = bytes.fromhex('08008052')  # mov w8, #0
+
 
 @dataclass(frozen=True)
 class PatchProfile:
@@ -331,6 +340,21 @@ def patched_binary(original, profile, verify_hash=True):
     return bytes(result)
 
 
+def patch_friend_tab_default_collapsed(binary, verify_hash=True):
+    if verify_hash and digest(binary) != (
+            '5da134826db5a5b51a20a297fb1b205c2f6f2adcf87e227b6d60f3070cebdd39'):
+        raise ValueError('Executable SHA-256 mismatch: expected the known-good NEIN executable.')
+    if len(binary) < max(FRIEND_TAB_DEFAULT_EXPANDED_OFFSETS) + 4 or \
+            struct.unpack_from('<I', binary)[0] != 0xFEEDFACF:
+        raise ValueError('Expected the verified thin ARM64 NEIN executable.')
+    result = bytearray(binary)
+    for offset in FRIEND_TAB_DEFAULT_EXPANDED_OFFSETS:
+        if binary[offset:offset + 4] != FRIEND_TAB_DEFAULT_EXPANDED_ORIGINAL:
+            raise ValueError('Expected FriendTabViewModel initial expansion instruction not found.')
+        result[offset:offset + 4] = FRIEND_TAB_COLLAPSED
+    return bytes(result)
+
+
 def add_dylib(data):
     if struct.unpack_from('<I', data, 0)[0] != 0xfeedfacf:
         raise ValueError('Expected thin 64-bit Mach-O')
@@ -390,6 +414,8 @@ def parse_args(argv=None):
                         help='Hide VOOM, News and Shopping tab buttons (verified on 26.14.0; experimental on 26.15.1)')
     parser.add_argument('--tab-diagnostics', action='store_true',
                         help='Add a tab-only JSON export button; requires --hide-promotional-tabs')
+    parser.add_argument('--collapse-friends-on-launch', action='store_true',
+                        help='Initialize the Friends section as collapsed')
     parser.add_argument('--allow-unverified', action='store_true',
                         help='Allow a different executable hash for a known version/build; still checks the original ARM64 instruction')
     args = parser.parse_args(argv)
@@ -445,6 +471,8 @@ def main():
             patched_binary(original, profile, verify_hash=not args.allow_unverified)
         )
         modified, injection = (entry_patched, None) if args.entry_only else add_dylib(entry_patched)
+        if args.collapse_friends_on_launch:
+            modified = patch_friend_tab_default_collapsed(modified, verify_hash=False)
         with zipfile.ZipFile(args.output, 'x') as target:
             target.comment = source.comment
             for entry in source.infolist():
@@ -503,7 +531,10 @@ def main():
     if len(modified) != len(original) or any(
             a != b and not (
                 (injection is not None and (16 <= i < 24 or start <= i < end)) or
-                profile.patch_offset <= i < profile.patch_offset + 4
+                profile.patch_offset <= i < profile.patch_offset + 4 or
+                (args.collapse_friends_on_launch and
+                 any(offset <= i < offset + 4
+                     for offset in FRIEND_TAB_DEFAULT_EXPANDED_OFFSETS))
             )
             for i, (a, b) in enumerate(zip(original, modified))):
         raise AssertionError('Changed bytes outside documented patch regions')
@@ -534,6 +565,7 @@ def main():
                 'message_diagnostics': args.message_diagnostics,
                 'remove_ads': args.remove_ads,
                 'hide_promotional_tabs': args.hide_promotional_tabs,
+                'collapse_friends_on_launch': args.collapse_friends_on_launch,
                 'tab_diagnostics': args.tab_diagnostics,
                 'source_ipa_sha256': digest_file(args.input),
                 'output_ipa_sha256': digest_file(args.output),
@@ -552,6 +584,15 @@ def main():
                                  'and documented Mach-O patches; all embedded app extensions and the Watch app were removed; '
                                  'one dylib and verified icon preview assets were added; ZIP CRC passed; '
                                  'dylib ad hoc signature verified.')}
+    if args.collapse_friends_on_launch:
+        manifest['home_friends'] = {
+            'mode': 'friend_tab_default_collapsed',
+            'view_model': 'LineHomeTab.FriendTabViewModel',
+            'state_field': 'isSectionExpanded',
+            'friend_case': 5,
+            'patch_offsets': [hex(offset) for offset in FRIEND_TAB_DEFAULT_EXPANDED_OFFSETS],
+            'manual_toggle_preserved': True,
+        }
     if args.remove_ads or args.hide_promotional_tabs:
         manifest['ad_removal'] = {
             'loader_hooks': args.remove_ads,

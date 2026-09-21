@@ -283,6 +283,18 @@ class MainToolTests(unittest.TestCase):
                     str(source), str(output), '--auto-login-patch',
                 ])
 
+    def test_friend_tab_initial_state_collapses_friend_case(self):
+        last = max(main.FRIEND_TAB_DEFAULT_EXPANDED_OFFSETS)
+        binary = bytearray(last + 4)
+        struct.pack_into('<I', binary, 0, 0xFEEDFACF)
+        for offset in main.FRIEND_TAB_DEFAULT_EXPANDED_OFFSETS:
+            binary[offset:offset + 4] = main.FRIEND_TAB_DEFAULT_EXPANDED_ORIGINAL
+
+        patched = main.patch_friend_tab_default_collapsed(bytes(binary), verify_hash=False)
+
+        for offset in main.FRIEND_TAB_DEFAULT_EXPANDED_OFFSETS:
+            self.assertEqual(patched[offset:offset + 4], main.FRIEND_TAB_COLLAPSED)
+
     def test_embedded_extensions_and_watch_app_are_excluded(self):
         names = [
             'Payload/LINE.app/Info.plist',
@@ -492,6 +504,15 @@ class MainToolTests(unittest.TestCase):
                 str(source), str(output), '--primary-login',
             ])
         self.assertTrue(args.primary_login)
+
+    def test_friends_cold_launch_collapse_option_is_parsed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = main.parse_args([
+                str(Path(directory) / 'input.ipa'),
+                str(Path(directory) / 'output.ipa'),
+                '--collapse-friends-on-launch',
+            ])
+        self.assertTrue(args.collapse_friends_on_launch)
 
     def test_tab_diagnostics_requires_promotional_tabs(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -33,10 +33,13 @@ NEIN 在德文中就是「不／不要（No）」的意思。
 預設使用副裝置模式（偽裝成 iPad 登入），建議使用副裝置先嘗試，以免影響帳號與內容，若要在主帳號嘗試，請務必先備份所有資料。
 
 ```sh
-python3 tools/main.py --keychain-compat --remove-ads --hide-promotional-tabs \
+python3 tools/main.py --keychain-compat --remove-ads --hide-promotional-tabs --collapse-friends-on-launch \
   jp.naver.line_26.15.1.ipa \
   output/NEIN-26.15.1-secondary.ipa
 ```
+
+`--collapse-friends-on-launch` 讓首頁的好友區塊在建立時預設收合；進入 App
+後仍可用原本的區塊控制手動展開。
 
 `--remove-ads` 會停用已分析的廣告 loader、隱藏廣告檢視，並封鎖已核對的 LINE
 廣告、Google Ads/IMA 與 Taboola 網域。封鎖清單保存在
