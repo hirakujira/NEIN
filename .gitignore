@@ -5,6 +5,7 @@
 # Build products and local runtime state
 build/
 output/
+.sentry-native/
 __pycache__/
 *.py[cod]
 .DS_Store
