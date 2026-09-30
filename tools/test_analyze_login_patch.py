@@ -95,6 +95,42 @@ class LoginPatchAnalyzerTests(unittest.TestCase):
         self.assertEqual(document['patch']['original_hex'], '40000036')
         self.assertNotIn('analysis', document)
 
+    def test_analyzes_unique_friend_tab_patch_sites(self):
+        binary = bytearray(sample_macho())
+        pattern = (
+            0x7100173F, 0x1A9F17E8, 0x94000000,
+            0x14000000, 0x7100173F, 0x1A9F17E8,
+        )
+        struct.pack_into('<6I', binary, 200 + 20 * 4, *pattern)
+
+        profile = analyzer.analyze_friend_tab_executable(bytes(binary))
+
+        self.assertEqual(
+            [patch['file_offset'] for patch in profile['patches']],
+            ['0x11c', '0x12c'],
+        )
+        analyzer._validate_home_friends_section(
+            {'home_friends': profile}, bytes(binary),
+        )
+        altered = dict(profile)
+        altered['patches'] = [dict(patch) for patch in profile['patches']]
+        altered['patches'][0]['file_offset'] = '0x120'
+        with self.assertRaisesRegex(ValueError, 'Friends'):
+            analyzer._validate_home_friends_section(
+                {'home_friends': altered}, bytes(binary),
+            )
+
+    def test_friend_tab_analysis_refuses_non_unique_signature(self):
+        binary = bytearray(sample_macho())
+        pattern = (
+            0x7100173F, 0x1A9F17E8, 0x94000000,
+            0x14000000, 0x7100173F, 0x1A9F17E8,
+        )
+        struct.pack_into('<6I', binary, 200 + 20 * 4, *pattern)
+        struct.pack_into('<6I', binary, 200 + 32 * 4, *pattern)
+
+        self.assertIsNone(analyzer.analyze_friend_tab_executable(bytes(binary)))
+
     def test_refuses_inconclusive_login_profile_section(self):
         analysis = analyzer.analyze_login_executable(
             sample_macho(), version='test', build='inconclusive',

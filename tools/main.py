@@ -42,7 +42,6 @@ DEFAULT_ICON = 'design_simple_banana'
 AD_DOMAIN_LIST = ROOT / 'ad_domains.txt'
 PATCH_PROFILE_DIR = ROOT / 'patch_profiles'
 
-
 @dataclass(frozen=True)
 class PatchProfile:
     version: str
@@ -53,6 +52,7 @@ class PatchProfile:
     original: bytes
     instruction: str
     keychain_profile: dict | None = None
+    home_friends: dict | None = None
 
 
 def digest(data):
@@ -281,6 +281,7 @@ def find_profile(info, original, allow_unverified=False, profile_dir=None):
         original=bytes.fromhex(patch['original_hex']),
         instruction=patch['instruction'],
         keychain_profile=document['keychain'],
+        home_friends=document.get('home_friends'),
     )
     verify_profile_for_binary(profile, original)
     return profile
@@ -306,6 +307,7 @@ def select_profile(
         original=bytes.fromhex(patch['original_hex']),
         instruction=patch['instruction'],
         keychain_profile=profile['keychain'],
+        home_friends=profile.get('home_friends'),
     )
     analysis = {
         'mode': 'analyzed_and_saved' if created else 'saved_profile',
@@ -328,6 +330,27 @@ def patched_binary(original, profile, verify_hash=True):
         raise ValueError('Expected ARM64 branch not found; refusing to patch.')
     result = bytearray(original)
     result[profile.patch_offset:profile.patch_offset + 4] = NOP
+    return bytes(result)
+
+
+def patch_friend_tab_default_collapsed(binary, profile):
+    if not isinstance(profile, dict) or not isinstance(profile.get('patches'), list):
+        raise ValueError('No analyzed Friends patch is available for this IPA.')
+    result = bytearray(binary)
+    for patch in profile['patches']:
+        try:
+            offset = int(patch['file_offset'], 16)
+            original = bytes.fromhex(patch['original_hex'])
+            replacement = bytes.fromhex(patch['patched_hex'])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError('Malformed analyzed Friends patch site.') from error
+        if (
+            len(original) != 4 or len(replacement) != 4 or
+            offset < 0 or offset + 4 > len(binary) or
+            binary[offset:offset + 4] != original
+        ):
+            raise ValueError('Expected FriendTabViewModel initial expansion instruction not found.')
+        result[offset:offset + 4] = replacement
     return bytes(result)
 
 
@@ -390,6 +413,8 @@ def parse_args(argv=None):
                         help='Hide VOOM, News and Shopping tab buttons (verified on 26.14.0; experimental on 26.15.1)')
     parser.add_argument('--tab-diagnostics', action='store_true',
                         help='Add a tab-only JSON export button; requires --hide-promotional-tabs')
+    parser.add_argument('--collapse-friends-on-launch', action='store_true',
+                        help='Initialize the Friends section as collapsed')
     parser.add_argument('--allow-unverified', action='store_true',
                         help='Allow a different executable hash for a known version/build; still checks the original ARM64 instruction')
     args = parser.parse_args(argv)
@@ -422,6 +447,8 @@ def main():
         profile, automatic_analysis = select_profile(
             info, original, args.auto_login_patch, args.allow_unverified,
         )
+        if args.collapse_friends_on_launch and profile.home_friends is None:
+            raise ValueError('No analyzed Friends patch is available for this IPA.')
     output_info = patched_info_plist(info, enable_icon_picker=not args.entry_only)
     icon_preview_files = (
         {} if args.entry_only else
@@ -445,6 +472,10 @@ def main():
             patched_binary(original, profile, verify_hash=not args.allow_unverified)
         )
         modified, injection = (entry_patched, None) if args.entry_only else add_dylib(entry_patched)
+        if args.collapse_friends_on_launch:
+            modified = patch_friend_tab_default_collapsed(
+                modified, profile.home_friends,
+            )
         with zipfile.ZipFile(args.output, 'x') as target:
             target.comment = source.comment
             for entry in source.infolist():
@@ -500,10 +531,21 @@ def main():
         raise AssertionError('Login entry instruction differs from the selected mode.')
     start = int(injection['load_command_offset'], 16) if injection else 0
     end = start + injection['load_command_size'] if injection else 0
+    friend_patch_ranges = (
+        [
+            (
+                int(patch['file_offset'], 16),
+                int(patch['file_offset'], 16) + len(bytes.fromhex(patch['original_hex'])),
+            )
+            for patch in profile.home_friends['patches']
+        ]
+        if args.collapse_friends_on_launch else []
+    )
     if len(modified) != len(original) or any(
             a != b and not (
                 (injection is not None and (16 <= i < 24 or start <= i < end)) or
-                profile.patch_offset <= i < profile.patch_offset + 4
+                profile.patch_offset <= i < profile.patch_offset + 4 or
+                any(start <= i < end for start, end in friend_patch_ranges)
             )
             for i, (a, b) in enumerate(zip(original, modified))):
         raise AssertionError('Changed bytes outside documented patch regions')
@@ -534,6 +576,7 @@ def main():
                 'message_diagnostics': args.message_diagnostics,
                 'remove_ads': args.remove_ads,
                 'hide_promotional_tabs': args.hide_promotional_tabs,
+                'collapse_friends_on_launch': args.collapse_friends_on_launch,
                 'tab_diagnostics': args.tab_diagnostics,
                 'source_ipa_sha256': digest_file(args.input),
                 'output_ipa_sha256': digest_file(args.output),
@@ -552,6 +595,17 @@ def main():
                                  'and documented Mach-O patches; all embedded app extensions and the Watch app were removed; '
                                  'one dylib and verified icon preview assets were added; ZIP CRC passed; '
                                  'dylib ad hoc signature verified.')}
+    if args.collapse_friends_on_launch:
+        manifest['home_friends'] = {
+            'mode': 'friend_tab_default_collapsed',
+            'view_model': 'LineHomeTab.FriendTabViewModel',
+            'state_field': 'isSectionExpanded',
+            'friend_case': 5,
+            'patch_offsets': [
+                patch['file_offset'] for patch in profile.home_friends['patches']
+            ],
+            'manual_toggle_preserved': True,
+        }
     if args.remove_ads or args.hide_promotional_tabs:
         manifest['ad_removal'] = {
             'loader_hooks': args.remove_ads,

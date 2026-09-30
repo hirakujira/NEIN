@@ -283,6 +283,26 @@ class MainToolTests(unittest.TestCase):
                     str(source), str(output), '--auto-login-patch',
                 ])
 
+    def test_friend_tab_initial_state_uses_analyzed_patch_sites(self):
+        offsets = (0x100, 0x110)
+        binary = bytearray(offsets[-1] + 4)
+        struct.pack_into('<I', binary, 0, 0xFEEDFACF)
+        profile = {'patches': []}
+        for offset in offsets:
+            original = bytes.fromhex('e8179f1a')
+            replacement = bytes.fromhex('08008052')
+            binary[offset:offset + 4] = original
+            profile['patches'].append({
+                'file_offset': hex(offset),
+                'original_hex': original.hex(),
+                'patched_hex': replacement.hex(),
+            })
+
+        patched = main.patch_friend_tab_default_collapsed(bytes(binary), profile)
+
+        for offset in offsets:
+            self.assertEqual(patched[offset:offset + 4], bytes.fromhex('08008052'))
+
     def test_embedded_extensions_and_watch_app_are_excluded(self):
         names = [
             'Payload/LINE.app/Info.plist',
@@ -492,6 +512,15 @@ class MainToolTests(unittest.TestCase):
                 str(source), str(output), '--primary-login',
             ])
         self.assertTrue(args.primary_login)
+
+    def test_friends_cold_launch_collapse_option_is_parsed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = main.parse_args([
+                str(Path(directory) / 'input.ipa'),
+                str(Path(directory) / 'output.ipa'),
+                '--collapse-friends-on-launch',
+            ])
+        self.assertTrue(args.collapse_friends_on_launch)
 
     def test_tab_diagnostics_requires_promotional_tabs(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -3,6 +3,25 @@
   "build": "2026.928.1406",
   "bundle_identifier": "jp.naver.line",
   "executable_sha256": "22df92edae697f58e6d1265d7b616202afb2d5ffffb4b5beab74b54132e6a040",
+  "home_friends": {
+    "friend_case": 5,
+    "kind": "friend_tab_default_collapsed",
+    "manual_toggle_preserved": true,
+    "patches": [
+      {
+        "file_offset": "0x359d3b4",
+        "original_hex": "e8179f1a",
+        "patched_hex": "08008052"
+      },
+      {
+        "file_offset": "0x359d3c4",
+        "original_hex": "e8179f1a",
+        "patched_hex": "08008052"
+      }
+    ],
+    "state_field": "isSectionExpanded",
+    "view_model": "LineHomeTab.FriendTabViewModel"
+  },
   "keychain": {
     "architecture": "arm64",
     "authentication_sites": [
