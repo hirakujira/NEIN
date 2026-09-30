@@ -13,6 +13,7 @@ import struct
 import subprocess
 import zipfile
 
+import analyze_patch_profile
 import scan_ad_domains
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +32,7 @@ DEFAULT_BUNDLE_ID = 'kinta.ma.nein'
 DEFAULT_APP_NAME = 'NEIN'
 DEFAULT_ICON = 'design_simple_banana'
 AD_DOMAIN_LIST = ROOT / 'ad_domains.txt'
+PATCH_PROFILE_DIR = ROOT / 'patch_profiles'
 
 
 @dataclass(frozen=True)
@@ -42,19 +44,7 @@ class PatchProfile:
     patch_va: int
     original: bytes
     instruction: str
-
-
-PATCH_PROFILES = (
-    PatchProfile(
-        version='26.14.0',
-        build='2026.828.1845',
-        executable_sha256='6586241b63f6a1007d5916498c77e5c539d7aa99e269e1994119d6018ac6d760',
-        patch_offset=0x5D868,
-        patch_va=0x10005D868,
-        original=bytes.fromhex('c0040036'),
-        instruction='tbz w0, #0, 0x10005d900',
-    ),
-)
+    keychain_profile: dict | None = None
 
 
 def digest(data):
@@ -98,30 +88,75 @@ def patched_info_plist(info, icon):
     return plistlib.dumps(result, fmt=plistlib.FMT_XML, sort_keys=False)
 
 
-def find_profile(info, original, allow_unverified=False):
-    if info.get('CFBundleIdentifier') != 'jp.naver.line':
-        raise ValueError('Expected the original jp.naver.line bundle identifier.')
-    version = info.get('CFBundleShortVersionString')
-    build = info.get('CFBundleVersion')
-    executable_sha256 = digest(original)
-    for profile in PATCH_PROFILES:
-        if (version, build, executable_sha256) == (
-            profile.version, profile.build, profile.executable_sha256,
-        ):
-            return profile
-    if allow_unverified:
-        matches = [profile for profile in PATCH_PROFILES
-                   if (profile.version, profile.build) == (version, build)]
-        if len(matches) == 1:
-            return matches[0]
-    supported = ', '.join(dict.fromkeys(f'{p.version} ({p.build})' for p in PATCH_PROFILES))
-    raise ValueError(
-        'Unsupported LINE executable. Expected a verified version/build/hash '
-        f'combination ({supported}); refusing to patch.'
+def verify_profile_for_binary(profile, original):
+    image = analyze_patch_profile.parse_arm64_macho(original)
+    expected_offset = (
+        image.text_offset + profile.patch_va - image.text_address
     )
+    if (
+        expected_offset != profile.patch_offset or
+        profile.patch_va < image.text_address or
+        profile.patch_va + 4 > image.text_address + image.text_size or
+        original[profile.patch_offset:profile.patch_offset + 4] != profile.original
+    ):
+        raise ValueError('Patch profile address, offset or instruction mismatch.')
 
 
-def patched_binary(original, profile=PATCH_PROFILES[0], verify_hash=True):
+def find_profile(info, original, allow_unverified=False, profile_dir=None):
+    document, _ = analyze_patch_profile.load_or_create_profile(
+        info, original,
+        PATCH_PROFILE_DIR if profile_dir is None else profile_dir,
+        allow_unverified=allow_unverified,
+    )
+    patch = document['login_patch']
+    profile = PatchProfile(
+        version=document['version'],
+        build=document['build'],
+        executable_sha256=document['executable_sha256'],
+        patch_offset=int(patch['file_offset'], 16),
+        patch_va=int(patch['virtual_address'], 16),
+        original=bytes.fromhex(patch['original_hex']),
+        instruction=patch['instruction'],
+        keychain_profile=document['keychain'],
+    )
+    verify_profile_for_binary(profile, original)
+    return profile
+
+
+def select_profile(
+    info, original, auto_login_patch=False, allow_unverified=False,
+    profile_dir=None,
+):
+    if not auto_login_patch:
+        return find_profile(info, original, allow_unverified, profile_dir), None
+    profile, created = analyze_patch_profile.load_or_create_profile(
+        info, original,
+        PATCH_PROFILE_DIR if profile_dir is None else profile_dir,
+    )
+    patch = profile['login_patch']
+    profile = PatchProfile(
+        version=profile['version'],
+        build=profile['build'],
+        executable_sha256=profile['executable_sha256'],
+        patch_offset=int(patch['file_offset'], 16),
+        patch_va=int(patch['virtual_address'], 16),
+        original=bytes.fromhex(patch['original_hex']),
+        instruction=patch['instruction'],
+        keychain_profile=profile['keychain'],
+    )
+    analysis = {
+        'mode': 'analyzed_and_saved' if created else 'saved_profile',
+        'automatic_patch': True,
+        'patch_applied': True,
+        'profile_loaded': True,
+        'profile_version': profile.version,
+        'profile_build': profile.build,
+        'profile_created': created,
+    }
+    return profile, analysis
+
+
+def patched_binary(original, profile, verify_hash=True):
     if verify_hash and digest(original) != profile.executable_sha256:
         raise ValueError('Executable SHA-256 mismatch: this patch is only for the analyzed dump.')
     if struct.unpack_from('<I', original)[0] != 0xFEEDFACF:
@@ -178,6 +213,8 @@ def parse_args(argv=None):
                         help=f'Use an embedded alternate app icon (default: {DEFAULT_ICON})')
     parser.add_argument('--entry-only', action='store_true',
                         help='Only patch the secondary-login entry; do not compile or inject a compatibility dylib')
+    parser.add_argument('--auto-login-patch', action='store_true',
+                        help='Load or generate one combined exact-match patch profile; requires --entry-only')
     parser.add_argument('--primary-login', action='store_true',
                         help='Keep the original primary-phone login branch instead of applying the iPad secondary-login patch')
     parser.add_argument('--diagnostics', action='store_true',
@@ -187,9 +224,9 @@ def parse_args(argv=None):
     parser.add_argument('--message-diagnostics', action='store_true',
                         help='Read-only post-login observations; includes current Keychain compatibility')
     parser.add_argument('--remove-ads', action='store_true',
-                        help='Block audited ad domains, disable ad loaders, and remove known ad views (26.14.0 only)')
+                        help='Block audited ad domains and disable known ad views (verified on 26.14.0; experimental on 26.15.1)')
     parser.add_argument('--hide-promotional-tabs', action='store_true',
-                        help='Hide VOOM, News and Shopping tab buttons (26.14.0 only)')
+                        help='Hide VOOM, News and Shopping tab buttons (verified on 26.14.0; experimental on 26.15.1)')
     parser.add_argument('--tab-diagnostics', action='store_true',
                         help='Add a tab-only JSON export button; requires --hide-promotional-tabs')
     parser.add_argument('--allow-unverified', action='store_true',
@@ -201,6 +238,8 @@ def parse_args(argv=None):
         args.keychain_compat = True
     if args.keychain_compat:
         args.diagnostics = True
+    if args.auto_login_patch and not args.entry_only:
+        parser.error('--auto-login-patch requires --entry-only.')
     if args.entry_only and (args.diagnostics or args.remove_ads or
                             args.hide_promotional_tabs):
         parser.error('--entry-only cannot be combined with diagnostics, compatibility hooks, or ad removal.')
@@ -219,9 +258,14 @@ def main():
             raise ValueError('Duplicate ZIP entry names are not supported.')
         original = source.read(EXECUTABLE)
         info = plistlib.loads(source.read(PLIST))
-        profile = find_profile(info, original, args.allow_unverified)
+        profile, automatic_analysis = select_profile(
+            info, original, args.auto_login_patch, args.allow_unverified,
+        )
     output_info = patched_info_plist(info, args.icon)
-    build, lib_data = (None, None) if args.entry_only else build_compat_dylib(args, info)
+    build, lib_data = (
+        (None, None) if args.entry_only
+        else build_compat_dylib(args, info, original, profile)
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(args.input) as source:
         names = source.namelist()
@@ -287,6 +331,7 @@ def main():
                 'secondary_login_patch_applied': not args.primary_login,
                 'version': profile.version,
                 'build': profile.build,
+                'automatic_login_analysis': automatic_analysis,
                 'minimum_ios': info['MinimumOSVersion'],
                 'keychain_compat': args.keychain_compat,
                 'allow_unverified': args.allow_unverified,
@@ -405,7 +450,7 @@ def load_ad_domains(path=AD_DOMAIN_LIST):
     return domains
 
 
-def build_compat_dylib(args, info):
+def build_compat_dylib(args, info, original, patch_profile):
     build = ROOT / 'build'
     build.mkdir(exist_ok=True)
     build_labels = []
@@ -427,6 +472,11 @@ def build_compat_dylib(args, info):
     if args.remove_ads:
         domains = load_ad_domains()
         domain_header.write_text(scan_ad_domains.render_header(domains), encoding='utf-8')
+    if args.keychain_compat:
+        (build / 'LINEKeychainProfileData.h').write_text(
+            analyze_patch_profile.render_keychain_header(patch_profile.keychain_profile),
+            encoding='utf-8',
+        )
     sdk = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
     subprocess.run(['xcrun', '--sdk', 'iphoneos', 'clang',
                     '-target', 'arm64-apple-ios' + info['MinimumOSVersion'],
@@ -443,8 +493,9 @@ def build_compat_dylib(args, info):
                     '-dynamiclib', '-framework', 'Foundation',
                     *(['-framework', 'UIKit', '-framework', 'CoreGraphics']
                       if args.remove_ads or args.hide_promotional_tabs else []),
-                    *(['-framework', 'WebKit', '-I', str(build)]
-                      if args.remove_ads else []),
+                    *(['-framework', 'WebKit'] if args.remove_ads else []),
+                    *(['-I', str(build)]
+                      if args.remove_ads or args.keychain_compat else []),
                     '-Wl,-install_name,' + LOAD_PATH,
                     str(ROOT / 'hooks' / 'LINEHooks.m'), '-o', str(lib)], check=True)
     subprocess.run(['codesign', '--force', '--sign', '-', str(lib)], check=True)

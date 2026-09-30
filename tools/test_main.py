@@ -1,9 +1,12 @@
+import hashlib
+import json
 import plistlib
 import struct
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import main  # noqa: E402
@@ -24,6 +27,7 @@ class MainToolTests(unittest.TestCase):
         return {
             'CFBundleIdentifier': 'jp.naver.line',
             'CFBundleShortVersionString': '26.14.0',
+            'CFBundleVersion': '2026.828.1845',
             'CFBundleDisplayName': 'LINE',
             'CFBundleName': 'LINE',
             'CFBundleURLTypes': [{
@@ -36,20 +40,181 @@ class MainToolTests(unittest.TestCase):
             'CFBundleIcons~ipad': icons,
         }
 
-    def test_entry_patch_requires_expected_instruction(self):
-        profile = main.PATCH_PROFILES[0]
-        binary = bytearray(profile.patch_offset + 4)
+    def sample_binary(self, reference=False):
+        image_base = 0x100000000
+        text_address = 0x100001000
+        text_offset = 200
+        text_size = 60 * 4
+        branch_index = 12
+        target_index = 14
+        branch = 0x36000000 | ((target_index - branch_index) << 5)
+        instructions = [main.analyze_patch_profile.NOP] * 60
+        instructions[branch_index] = branch
+        if reference:
+            instructions[:len(main.analyze_patch_profile.REFERENCE_WINDOW)] = (
+                main.analyze_patch_profile.REFERENCE_WINDOW
+            )
+            instructions[branch_index] |= (target_index - branch_index) << 5
+        text = struct.pack('<60I', *instructions)
+        binary = bytearray(text_offset + text_size + 3)
         struct.pack_into('<I', binary, 0, 0xFEEDFACF)
-        binary[profile.patch_offset:profile.patch_offset + 4] = profile.original
+        struct.pack_into('<I', binary, 4, 0x0100000C)
+        struct.pack_into('<II', binary, 16, 2, 168)
+        struct.pack_into('<II', binary, 32, 0x19, 152)
+        binary[40:46] = b'__TEXT'
+        struct.pack_into('<QQQQ', binary, 56, image_base, 0x2000, 0, len(binary))
+        struct.pack_into('<IIII', binary, 88, 7, 5, 1, 0)
+        section = 104
+        binary[section:section + 6] = b'__text'
+        binary[section + 16:section + 22] = b'__TEXT'
+        struct.pack_into(
+            '<QQI', binary, section + 32, text_address, text_size, text_offset,
+        )
+        struct.pack_into('<IIII', binary, 184, 0x26, 16, 440, 3)
+        binary[text_offset:text_offset + text_size] = text
+        binary[440:443] = b'\x80\x20\0'
+        return bytes(binary)
+
+    def combined_profile(self, info, original, offset=0xf8):
+        return {
+            'schema_version': main.analyze_patch_profile.PROFILE_SCHEMA_VERSION,
+            'profile_type': main.analyze_patch_profile.PROFILE_TYPE,
+            'bundle_identifier': 'jp.naver.line',
+            'version': info['CFBundleShortVersionString'],
+            'build': info['CFBundleVersion'],
+            'executable_sha256': hashlib.sha256(original).hexdigest(),
+            'architecture': 'arm64',
+            'login_patch': {
+                'kind': 'secondary_login_entry_branch',
+                'file_offset': hex(offset),
+                'virtual_address': '0x100001030',
+                'target_address': '0x100001038',
+                'instruction': 'tbz w0, #0, 0x100001038',
+                'original_hex': '40000036',
+                'patched_hex': '1f2003d5',
+            },
+            'keychain': {'profile_type': 'line_keychain'},
+        }
+
+    def test_entry_patch_requires_expected_instruction(self):
+        profile = main.PatchProfile(
+            '26.14.0', 'test', '0' * 64, 248, 0x100001030,
+            bytes.fromhex('40000036'), 'tbz w0, #0, 0x100001038',
+        )
+        binary = bytearray(self.sample_binary())
         patched = main.patched_binary(bytes(binary), profile, verify_hash=False)
         self.assertEqual(patched[profile.patch_offset:profile.patch_offset + 4], main.NOP)
 
     def test_entry_patch_rejects_wrong_instruction(self):
-        profile = main.PATCH_PROFILES[0]
-        binary = bytearray(profile.patch_offset + 4)
-        struct.pack_into('<I', binary, 0, 0xFEEDFACF)
+        profile = main.PatchProfile(
+            '26.14.0', 'test', '0' * 64, 248, 0x100001030,
+            bytes.fromhex('40000036'), 'tbz w0, #0, 0x100001038',
+        )
+        binary = bytearray(self.sample_binary())
+        binary[248:252] = bytes.fromhex('1f2003d5')
         with self.assertRaises(ValueError):
             main.patched_binary(bytes(binary), profile, verify_hash=False)
+
+    def test_profile_loader_matches_version_build_and_binary_hash(self):
+        info = self.sample_info()
+        original = self.sample_binary()
+        document = self.combined_profile(info, original)
+        with mock.patch.object(
+            main.analyze_patch_profile, 'load_or_create_profile',
+            return_value=(document, False),
+        ):
+            profile, result = main.select_profile(
+                info, original, auto_login_patch=True,
+            )
+        self.assertEqual(profile.patch_offset, 0xf8)
+        self.assertEqual(profile.original, bytes.fromhex('40000036'))
+        self.assertEqual(profile.patch_va, 0x100001030)
+        self.assertEqual(result['mode'], 'saved_profile')
+        self.assertTrue(result['automatic_patch'])
+        self.assertTrue(result['patch_applied'])
+        self.assertTrue(result['profile_loaded'])
+
+    def test_exact_profile_allows_normal_hook_build_mode(self):
+        info = self.sample_info()
+        info['CFBundleShortVersionString'] = '26.15.1'
+        info['CFBundleVersion'] = '2026.928.1406'
+        original = self.sample_binary()
+        document = self.combined_profile(info, original)
+        with mock.patch.object(
+            main.analyze_patch_profile, 'load_or_create_profile',
+            return_value=(document, False),
+        ):
+            profile, result = main.select_profile(
+                info, original,
+            )
+        with tempfile.TemporaryDirectory() as directory:
+            args = main.parse_args([
+                str(Path(directory) / 'input.ipa'),
+                str(Path(directory) / 'output.ipa'),
+                '--keychain-compat', '--remove-ads', '--hide-promotional-tabs',
+            ])
+        self.assertEqual(profile.version, '26.15.1')
+        self.assertIsNone(result)
+        self.assertFalse(args.entry_only)
+        self.assertTrue(args.keychain_compat)
+        self.assertTrue(args.remove_ads)
+        self.assertTrue(args.hide_promotional_tabs)
+
+    def test_missing_profile_is_analyzed_saved_and_loaded(self):
+        info = self.sample_info()
+        info['CFBundleShortVersionString'] = '26.15.1'
+        info['CFBundleVersion'] = '2026.928.1406'
+        original = self.sample_binary(reference=True)
+        document = self.combined_profile(info, original)
+        with mock.patch.object(
+            main.analyze_patch_profile, 'load_or_create_profile',
+            return_value=(document, True),
+        ):
+            profile, result = main.select_profile(
+                info, original, auto_login_patch=True,
+            )
+
+        self.assertTrue(result['automatic_patch'])
+        self.assertTrue(result['profile_loaded'])
+        self.assertTrue(result['profile_created'])
+        self.assertEqual(result['mode'], 'analyzed_and_saved')
+        self.assertEqual(profile.version, '26.15.1')
+        self.assertEqual(profile.build, '2026.928.1406')
+        self.assertEqual(profile.executable_sha256, main.digest(original))
+        self.assertEqual(profile.patch_offset, 0xf8)
+
+    def test_missing_inconclusive_profile_refuses_and_saves_nothing(self):
+        info = self.sample_info()
+        original = self.sample_binary()
+        with mock.patch.object(
+            main.analyze_patch_profile, 'load_or_create_profile',
+            side_effect=ValueError('No high-confidence login patch candidate to save.'),
+        ):
+            with self.assertRaisesRegex(ValueError, 'No high-confidence'):
+                main.find_profile(info, original)
+
+    def test_auto_profile_refuses_unknown_binary_hash(self):
+        info = self.sample_info()
+        original = self.sample_binary()
+        changed = bytearray(original)
+        changed[200] = 1
+        with mock.patch.object(
+            main.analyze_patch_profile, 'load_or_create_profile',
+            side_effect=ValueError('Combined patch profile does not exactly match this IPA.'),
+        ):
+            with self.assertRaisesRegex(ValueError, 'exactly match'):
+                main.select_profile(
+                    info, bytes(changed), auto_login_patch=True,
+                )
+
+    def test_auto_login_patch_requires_entry_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'input.ipa'
+            output = Path(directory) / 'output.ipa'
+            with self.assertRaises(SystemExit):
+                main.parse_args([
+                    str(source), str(output), '--auto-login-patch',
+                ])
 
     def test_embedded_extensions_and_watch_app_are_excluded(self):
         names = [
