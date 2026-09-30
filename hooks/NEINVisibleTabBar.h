@@ -1,18 +1,24 @@
-#include "LINEVisibleTabModel.h"
-#include "LINEHomeTapSequence.h"
+#include "NEINVisibleTabModel.h"
+#include "NEINHomeTapSequence.h"
 
-static char LMVisibleTabBarKey;
-static char LMVisibleTabSourceOwnerKey;
+static BOOL NEINIsSettingsTabItem(UITabBarItem *item) {
+    return NEINTabTitleIsOneOf(item.title,
+        @[@"SETTINGS", @"設定", @"设置", @"設置", @"설정"]);
+}
 
-@class LMVisibleTabBar;
-@interface LMVisibleTabSourceOwner : NSObject
-@property(nonatomic, weak) LMVisibleTabBar *presentation;
+static char NEINVisibleTabBarKey;
+static char NEINVisibleTabSourceOwnerKey;
+
+@class NEINVisibleTabBar;
+@interface NEINVisibleTabSourceOwner : NSObject
+@property(nonatomic, weak) NEINVisibleTabBar *presentation;
 @end
-@implementation LMVisibleTabSourceOwner @end
+@implementation NEINVisibleTabSourceOwner @end
 
-@interface LMVisibleTabBar : NSObject <UITabBarDelegate>
+@interface NEINVisibleTabBar : NSObject <UITabBarDelegate>
 @property(nonatomic, weak) UITabBarController *controller;
 @property(nonatomic, strong) UITabBar *bar;
+@property(nonatomic, strong) UITabBarItem *settingsItem;
 @property(nonatomic, copy) NSArray<UITabBarItem *> *sourceItems;
 @property(nonatomic, copy) NSArray<UIViewController *> *sourceControllers;
 @property(nonatomic, copy) NSArray<NSNumber *> *indices;
@@ -30,7 +36,7 @@ static char LMVisibleTabSourceOwnerKey;
 - (void)syncVisibility;
 @end
 
-@implementation LMVisibleTabBar
+@implementation NEINVisibleTabBar
 - (instancetype)init {
     if ((self = [super init])) {
         _lastVisibleIndex = NSNotFound;
@@ -40,6 +46,23 @@ static char LMVisibleTabSourceOwnerKey;
         _bar.itemPositioning = UITabBarItemPositioningFill;
     }
     return self;
+}
+
+- (NSString *)settingsTabPresentationTitle {
+    NSString *language = NSBundle.mainBundle.preferredLocalizations.firstObject.lowercaseString;
+    if ([language hasPrefix:@"en"]) return @"Settings";
+    if ([language hasPrefix:@"zh-hans"]) return @"设置";
+    if ([language hasPrefix:@"ko"]) return @"설정";
+    return @"設定";
+}
+
+- (UITabBarItem *)newSettingsItem {
+    NSString *title = [self settingsTabPresentationTitle];
+    UITabBarItem *item = [[UITabBarItem alloc] initWithTitle:title
+        image:[UIImage systemImageNamed:@"gearshape"]
+        selectedImage:[UIImage systemImageNamed:@"gearshape.fill"]];
+    item.accessibilityLabel = title;
+    return item;
 }
 
 - (BOOL)matchesCurrentModel {
@@ -57,7 +80,7 @@ static char LMVisibleTabSourceOwnerKey;
 - (void)deactivate {
     if (self.active) {
         UITabBar *source = self.controller.tabBar;
-        objc_setAssociatedObject(source, &LMVisibleTabSourceOwnerKey, nil,
+        objc_setAssociatedObject(source, &NEINVisibleTabSourceOwnerKey, nil,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         source.alpha = self.originalAlpha;
         source.userInteractionEnabled = self.originalInteraction;
@@ -101,14 +124,24 @@ static char LMVisibleTabSourceOwnerKey;
         UITabBar *source = controller.tabBar;
         NSArray<UITabBarItem *> *items = source.items;
         NSArray<UIViewController *> *controllers = controller.viewControllers;
-        NSArray<NSNumber *> *indices = LMVisibleTabIndices(items);
+        NSArray<NSNumber *> *indices = NEINVisibleTabIndices(items);
         BOOL valid = items.count == controllers.count && indices.count >= 2 &&
-                     indices.count < items.count && source.superview != nil;
+                     NEINIsMainLineTabBar(items) && source.superview != nil;
         for (NSUInteger i = 0; valid && i < items.count; i++) {
             valid = ((UIViewController *)controllers[i]).tabBarItem == items[i];
         }
         if (!valid) { [self deactivate]; return; }
-        BOOL rebuild = ![self matchesCurrentModel] || ![indices isEqualToArray:self.indices];
+        if (!self.settingsItem) self.settingsItem = [self newSettingsItem];
+        BOOL hasNativeSettings = NO;
+        for (NSNumber *index in indices) {
+            if (NEINIsSettingsTabItem(items[index.unsignedIntegerValue])) {
+                hasNativeSettings = YES;
+                break;
+            }
+        }
+        BOOL rebuild = ![self matchesCurrentModel] || ![indices isEqualToArray:self.indices] ||
+                       self.bar.items.count != indices.count + !hasNativeSettings ||
+                       (self.bar.items.lastObject == self.settingsItem) != !hasNativeSettings;
         self.sourceItems = items;
         self.sourceControllers = controllers;
         self.indices = indices;
@@ -121,6 +154,7 @@ static char LMVisibleTabSourceOwnerKey;
                 [copies addObject:[[UITabBarItem alloc] initWithTitle:item.title
                     image:item.image selectedImage:item.selectedImage]];
             }
+            if (!hasNativeSettings) [copies addObject:self.settingsItem];
             [self.bar setItems:copies animated:NO];
         }
         for (NSUInteger i = 0; i < indices.count; i++) {
@@ -140,9 +174,9 @@ static char LMVisibleTabSourceOwnerKey;
             self.bar.standardAppearance = [source.standardAppearance copy];
             self.bar.scrollEdgeAppearance = [source.scrollEdgeAppearance copy];
             self.active = YES;
-            LMVisibleTabSourceOwner *owner = [LMVisibleTabSourceOwner new];
+            NEINVisibleTabSourceOwner *owner = [NEINVisibleTabSourceOwner new];
             owner.presentation = self;
-            objc_setAssociatedObject(source, &LMVisibleTabSourceOwnerKey, owner,
+            objc_setAssociatedObject(source, &NEINVisibleTabSourceOwnerKey, owner,
                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         }
         if (self.bar.tintColor != source.tintColor) self.bar.tintColor = source.tintColor;
@@ -160,7 +194,7 @@ static char LMVisibleTabSourceOwnerKey;
         if (!source.accessibilityElementsHidden) source.accessibilityElementsHidden = YES;
 
         NSUInteger selected = [controllers indexOfObjectIdenticalTo:controller.selectedViewController];
-        NSUInteger destination = LMVisibleTabDestination(items, self.lastVisibleIndex, selected);
+        NSUInteger destination = NEINVisibleTabDestination(items, self.lastVisibleIndex, selected);
         if (destination != NSNotFound && destination != selected) {
             controller.selectedViewController = controllers[destination];
             selected = [controllers indexOfObjectIdenticalTo:controller.selectedViewController];
@@ -176,19 +210,29 @@ static char LMVisibleTabSourceOwnerKey;
 
 - (void)tabBar:(UITabBar *)tabBar didSelectItem:(UITabBarItem *)item {
     if (!self.active || self.updating || ![self matchesCurrentModel]) { [self update]; return; }
+    if (item == self.settingsItem) {
+        [self.homeTapTimes removeAllObjects];
+        NEINOpenLineSettings(self.controller);
+        [self update];
+        return;
+    }
     NSUInteger index = [tabBar.items indexOfObjectIdenticalTo:item];
     if (index >= self.indices.count) return;
     NSUInteger original = self.indices[index].unsignedIntegerValue;
     UITabBarItem *source = self.sourceItems[original];
-    if (!LMIsHomeTabTitle(source.title)) [self.homeTapTimes removeAllObjects];
-    if (LMVisibleTabIsPromotional(source) || !source.enabled) { [self update]; return; }
+    BOOL homeItem = NEINIsHomeTabTitle(source.title);
+    if (!homeItem) [self.homeTapTimes removeAllObjects];
+    if (NEINVisibleTabIsPromotional(source) || !source.enabled) { [self update]; return; }
     UITabBarController *controller = self.controller;
     UIViewController *destination = self.sourceControllers[original];
     id<UITabBarControllerDelegate> delegate = controller.delegate;
     if ([delegate respondsToSelector:@selector(tabBarController:shouldSelectViewController:)] &&
         ![delegate tabBarController:controller shouldSelectViewController:destination]) {
-        [self.homeTapTimes removeAllObjects];
+        BOOL openSettings = NEINRecordHomeTap(self.homeTapTimes,
+            NSProcessInfo.processInfo.systemUptime,
+            homeItem && controller.selectedViewController == destination);
         [self update];
+        if (openSettings) NEINOpenLineSettings(controller);
         return;
     }
     if (![self matchesCurrentModel]) { [self update]; return; }
@@ -198,43 +242,43 @@ static char LMVisibleTabSourceOwnerKey;
         [delegate tabBarController:controller didSelectViewController:destination];
     }
     [self update];
-    BOOL home = controller.selectedViewController == destination && LMIsHomeTabTitle(source.title);
-    if (LMRecordHomeTap(self.homeTapTimes, NSProcessInfo.processInfo.systemUptime, home)) {
-        LMOpenLineSettings(controller);
+    BOOL home = controller.selectedViewController == destination && homeItem;
+    if (NEINRecordHomeTap(self.homeTapTimes, NSProcessInfo.processInfo.systemUptime, home)) {
+        NEINOpenLineSettings(controller);
     }
 }
 @end
 
-static void LMSyncSourceTabVisibility(UITabBar *source) {
-    LMVisibleTabSourceOwner *owner = objc_getAssociatedObject(source, &LMVisibleTabSourceOwnerKey);
+static void NEINSyncSourceTabVisibility(UITabBar *source) {
+    NEINVisibleTabSourceOwner *owner = objc_getAssociatedObject(source, &NEINVisibleTabSourceOwnerKey);
     [owner.presentation syncVisibility];
 }
 
-static CGFloat LMVisibleSourceAlpha(UITabBar *source, CGFloat requested) {
-    LMVisibleTabSourceOwner *owner = objc_getAssociatedObject(source, &LMVisibleTabSourceOwnerKey);
-    LMVisibleTabBar *presentation = owner.presentation;
+static CGFloat NEINVisibleSourceAlpha(UITabBar *source, CGFloat requested) {
+    NEINVisibleTabSourceOwner *owner = objc_getAssociatedObject(source, &NEINVisibleTabSourceOwnerKey);
+    NEINVisibleTabBar *presentation = owner.presentation;
     if (!presentation.active) return requested;
     if (!presentation.suppressingSourceAppearance) presentation.originalAlpha = requested;
     return 0;
 }
 
-static void LMUpdateVisibleTabBar(UITabBarController *controller) {
-    LMVisibleTabBar *presentation = objc_getAssociatedObject(controller, &LMVisibleTabBarKey);
+static void NEINUpdateVisibleTabBar(UITabBarController *controller) {
+    NEINVisibleTabBar *presentation = objc_getAssociatedObject(controller, &NEINVisibleTabBarKey);
     if (!presentation) {
-        if (LMVisibleTabIndices(controller.tabBar.items).count == controller.tabBar.items.count) return;
-        presentation = [LMVisibleTabBar new];
+        if (!NEINIsMainLineTabBar(controller.tabBar.items)) return;
+        presentation = [NEINVisibleTabBar new];
         presentation.controller = controller;
-        objc_setAssociatedObject(controller, &LMVisibleTabBarKey, presentation,
+        objc_setAssociatedObject(controller, &NEINVisibleTabBarKey, presentation,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     [presentation update];
 }
 
-static NSUInteger LMGuardVisibleTabSelection(UITabBarController *controller, NSUInteger requested) {
-    LMVisibleTabBar *presentation = objc_getAssociatedObject(controller, &LMVisibleTabBarKey);
+static NSUInteger NEINGuardVisibleTabSelection(UITabBarController *controller, NSUInteger requested) {
+    NEINVisibleTabBar *presentation = objc_getAssociatedObject(controller, &NEINVisibleTabBarKey);
     if (!presentation.active || ![presentation matchesCurrentModel] ||
         requested >= presentation.sourceItems.count) return requested;
     NSUInteger current = [presentation.sourceControllers
                            indexOfObjectIdenticalTo:controller.selectedViewController];
-    return LMVisibleTabDestination(presentation.sourceItems, current, requested);
+    return NEINVisibleTabDestination(presentation.sourceItems, current, requested);
 }

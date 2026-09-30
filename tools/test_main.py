@@ -5,6 +5,9 @@ import struct
 import sys
 import tempfile
 import unittest
+import zipfile
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 from unittest import mock
 
@@ -114,6 +117,70 @@ class MainToolTests(unittest.TestCase):
         binary[248:252] = bytes.fromhex('1f2003d5')
         with self.assertRaises(ValueError):
             main.patched_binary(bytes(binary), profile, verify_hash=False)
+
+    def test_digest_file_streams_large_input(self):
+        content = b'nein' * (1024 * 1024)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'input.ipa'
+            path.write_bytes(content)
+            with mock.patch.object(Path, 'read_bytes', side_effect=AssertionError('full read')):
+                self.assertEqual(main.digest_file(path), hashlib.sha256(content).hexdigest())
+
+    def test_entry_only_preserves_large_archive_members(self):
+        info = self.sample_info()
+        info['MinimumOSVersion'] = '18.0'
+        original = self.sample_binary()
+        profile = main.PatchProfile(
+            '26.14.0', 'test', hashlib.sha256(original).hexdigest(),
+            248, 0x100001030, bytes.fromhex('40000036'),
+            'tbz w0, #0, 0x100001038',
+        )
+        payload = b'nein' * (1024 * 1024)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'input.ipa'
+            output = Path(directory) / 'output.ipa'
+            with zipfile.ZipFile(source, 'w') as archive:
+                archive.writestr(main.EXECUTABLE, original)
+                archive.writestr(main.PLIST, plistlib.dumps(info))
+                archive.writestr('Payload/LINE.app/Frameworks/', b'')
+                member = zipfile.ZipInfo('Payload/LINE.app/large.dat')
+                member.compress_type = zipfile.ZIP_DEFLATED
+                archive.writestr(member, payload)
+                archive.writestr('Payload/LINE.app/PlugIns/removed.appex/file', b'removed')
+            args = main.parse_args([str(source), str(output), '--entry-only'])
+            with mock.patch.object(main, 'parse_args', return_value=args), \
+                    mock.patch.object(main, 'select_profile', return_value=(profile, None)), \
+                    redirect_stderr(StringIO()), \
+                    mock.patch('sys.stdout', new_callable=StringIO):
+                main.main()
+            with zipfile.ZipFile(output) as archive:
+                self.assertIn('Payload/LINE.app/Frameworks/', archive.namelist())
+                self.assertEqual(archive.read('Payload/LINE.app/large.dat'), payload)
+                self.assertEqual(archive.getinfo('Payload/LINE.app/large.dat').compress_type,
+                                 zipfile.ZIP_DEFLATED)
+                self.assertNotIn('Payload/LINE.app/PlugIns/removed.appex/file',
+                                 archive.namelist())
+                self.assertEqual(archive.read(main.EXECUTABLE),
+                                 main.patched_binary(original, profile))
+            manifest = json.loads(output.with_suffix('.manifest.json').read_text())
+            self.assertEqual(manifest['source_ipa_sha256'], hashlib.sha256(source.read_bytes()).hexdigest())
+            self.assertEqual(manifest['output_ipa_sha256'], hashlib.sha256(output.read_bytes()).hexdigest())
+            self.assertEqual(manifest['changed_byte_offsets'], ['0xf8', '0xf9', '0xfa', '0xfb'])
+
+    def test_streamed_archive_copy_rejects_corrupt_member(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'bad.ipa'
+            output = Path(directory) / 'output.ipa'
+            with zipfile.ZipFile(source, 'w') as archive:
+                archive.writestr('Payload/LINE.app/payload', b'corrupt me')
+            damaged = bytearray(source.read_bytes())
+            damaged[damaged.index(b'corrupt me')] ^= 1
+            source.write_bytes(damaged)
+            with zipfile.ZipFile(source) as archive, zipfile.ZipFile(output, 'w') as target:
+                with self.assertRaises(zipfile.BadZipFile):
+                    main.copy_archive_member(
+                        archive, target, archive.getinfo('Payload/LINE.app/payload'),
+                    )
 
     def test_profile_loader_matches_version_build_and_binary_hash(self):
         info = self.sample_info()
@@ -232,7 +299,7 @@ class MainToolTests(unittest.TestCase):
 
     def test_output_info_plist_uses_default_bundle_id(self):
         source = self.sample_info()
-        output = plistlib.loads(main.patched_info_plist(source, main.DEFAULT_ICON))
+        output = plistlib.loads(main.patched_info_plist(source))
         self.assertEqual(output['CFBundleIdentifier'], 'kinta.ma.nein')
         self.assertEqual(output['CFBundleDisplayName'], 'NEIN')
         self.assertEqual(output['CFBundleName'], 'NEIN')
@@ -253,29 +320,123 @@ class MainToolTests(unittest.TestCase):
             'basic_default',
         )
 
-    def test_output_info_plist_accepts_available_custom_icon(self):
+    def test_icon_picker_registers_all_icons_and_original_primary(self):
+        source = self.sample_info()
         output = plistlib.loads(main.patched_info_plist(
-            self.sample_info(), 'design_deep_blue',
+            source, enable_icon_picker=True,
         ))
+        expected_names = ['basic_default', 'design_deep_blue', 'design_simple_banana']
+        config = output['NEINIconPicker']
+        self.assertEqual(config['AllowedIconNames'], expected_names)
+        self.assertTrue(config['Enabled'])
+        self.assertEqual(config['PrimaryIcon'], 'design_simple_banana')
+        self.assertEqual(config['OriginalPrimaryIcon'], 'basic_default')
+        for key in ('CFBundleIcons', 'CFBundleIcons~ipad'):
+            icons = output[key]
+            self.assertEqual(
+                icons['CFBundlePrimaryIcon']['CFBundleIconName'],
+                'design_simple_banana',
+            )
+            self.assertEqual(
+                set(icons['CFBundleAlternateIcons']),
+                {'basic_default', 'design_deep_blue'},
+            )
+            self.assertEqual(
+                icons['CFBundleAlternateIcons']['basic_default']['CFBundleIconName'],
+                'basic_default',
+            )
+
+    def test_entry_only_plist_does_not_enable_icon_picker(self):
+        output = plistlib.loads(main.patched_info_plist(
+            self.sample_info(), enable_icon_picker=False,
+        ))
+        self.assertNotIn('NEINIconPicker', output)
         self.assertEqual(
-            output['CFBundleIcons']['CFBundlePrimaryIcon']['CFBundleIconName'],
-            'design_deep_blue',
+            set(output['CFBundleIcons']['CFBundleAlternateIcons']),
+            {'design_deep_blue'},
         )
 
-    def test_output_info_plist_rejects_unknown_icon(self):
-        with self.assertRaisesRegex(ValueError, 'Unknown app icon'):
-            main.patched_info_plist(self.sample_info(), 'unknown_icon')
+    def test_icon_list_requires_matching_iphone_and_ipad_registration(self):
+        source = self.sample_info()
+        source['CFBundleIcons~ipad'] = dict(source['CFBundleIcons~ipad'])
+        source['CFBundleIcons~ipad']['CFBundleAlternateIcons'] = dict(
+            source['CFBundleIcons~ipad']['CFBundleAlternateIcons'],
+        )
+        source['CFBundleIcons~ipad']['CFBundleAlternateIcons'].pop('design_deep_blue')
+        with self.assertRaisesRegex(ValueError, 'lists do not match'):
+            main.app_icon_names(source)
 
-    def test_icon_argument_defaults_and_accepts_custom_value(self):
+    def test_icon_preview_manifest_is_checked_against_full_allowlist(self):
+        names = ['basic_default', 'design_simple_banana']
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = {
+                'schemaVersion': 1,
+                'icons': [
+                    {'name': name, 'file': name + '.png'}
+                    for name in names
+                ],
+            }
+            (root / 'manifest.json').write_text(json.dumps(manifest))
+            for name in names:
+                (root / (name + '.png')).write_bytes(b'\x89PNG\r\n\x1a\nvalid')
+            files = main.collect_icon_preview_assets(root, names)
+            self.assertEqual(
+                list(files),
+                [
+                    main.ICON_PREVIEW_ROOT + 'basic_default.png',
+                    main.ICON_PREVIEW_ROOT + 'design_simple_banana.png',
+                    main.ICON_PREVIEW_ROOT + 'manifest.json',
+                ],
+            )
+
+    def test_icon_preview_manifest_rejects_missing_or_mismatched_previews(self):
+        names = ['basic_default', 'design_simple_banana']
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'manifest.json').write_text(json.dumps({
+                'schemaVersion': 1,
+                'icons': [{'name': names[0], 'file': names[0] + '.png'}],
+            }))
+            with self.assertRaisesRegex(ValueError, 'does not match'):
+                main.collect_icon_preview_assets(root, names)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'manifest.json').write_text(json.dumps({
+                'schemaVersion': 1,
+                'icons': [
+                    {'name': name, 'file': name + '.png'}
+                    for name in names
+                ],
+            }))
+            (root / (names[0] + '.png')).write_bytes(b'not png')
+            with self.assertRaisesRegex(ValueError, 'missing icon preview'):
+                main.collect_icon_preview_assets(root, names)
+
+    def test_icon_preview_extraction_requires_main_assets_catalog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ipa = Path(directory) / 'line.ipa'
+            with zipfile.ZipFile(ipa, 'w') as archive:
+                archive.writestr('Payload/LINE.app/Info.plist', b'plist')
+            with mock.patch.object(main.sys, 'platform', 'darwin'):
+                with self.assertRaisesRegex(ValueError, 'main Assets.car'):
+                    main.extract_icon_previews(ipa, ['basic_default'])
+
+    def test_output_info_plist_requires_default_icon(self):
+        source = self.sample_info()
+        source['CFBundleIcons']['CFBundleAlternateIcons'].pop(main.DEFAULT_ICON)
+        with self.assertRaisesRegex(ValueError, 'Default app icon is unavailable'):
+            main.patched_info_plist(source)
+
+    def test_icon_option_is_not_supported(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / 'input.ipa'
             output = Path(directory) / 'output.ipa'
-            default_args = main.parse_args([str(source), str(output)])
-            custom_args = main.parse_args([
-                str(source), str(output), '--icon', 'design_deep_blue',
-            ])
-        self.assertEqual(default_args.icon, 'design_simple_banana')
-        self.assertEqual(custom_args.icon, 'design_deep_blue')
+            with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+                main.parse_args([
+                    str(source), str(output), '--icon', 'design_deep_blue',
+                ])
 
     def test_ad_removal_options_are_parsed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -320,7 +481,7 @@ class MainToolTests(unittest.TestCase):
             'taboolanews.com',
         ))
         header = main.scan_ad_domains.render_header(domains)
-        self.assertIn('LMAdBlockedDomains', header)
+        self.assertIn('NEINAdBlockedDomains', header)
         self.assertIn('@"taboola.com"', header)
 
     def test_primary_login_mode_is_parsed(self):

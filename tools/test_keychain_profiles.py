@@ -96,23 +96,23 @@ class KeychainProfileTests(unittest.TestCase):
                 source = r'''
 #include <assert.h>
 #include <string.h>
-#include "LINEKeychainProfiles.h"
-#include "LINEKeychainProfileData.h"
+#include "NEINKeychainProfiles.h"
+#include "NEINKeychainProfileData.h"
 
 int main(void) {
-    assert(strcmp(LMKEmbeddedKeychainProfile.version, "VERSION") == 0);
-    assert(LMKEmbeddedKeychainProfile.got_address == GOT_ADDRESS);
-    assert(LMKEmbeddedKeychainProfile.got_offset == GOT_OFFSET);
-    assert(LMKEmbeddedKeychainProfile.authentication_site_count == 6);
-    assert(LMKEmbeddedKeychainProfile.e2ee_site_count == 1);
-    assert(LMKKeychainProfileHasCallSite(
-        LMKEmbeddedKeychainProfile.authentication_sites,
-        LMKEmbeddedKeychainProfile.authentication_site_count,
-        LMK_KEYCHAIN_ADD, AUTH_SITE));
-    assert(LMKKeychainProfileHasCallSite(
-        LMKEmbeddedKeychainProfile.e2ee_sites,
-        LMKEmbeddedKeychainProfile.e2ee_site_count,
-        LMK_KEYCHAIN_COPY, E2EE_SITE));
+    assert(strcmp(NEINKEmbeddedKeychainProfile.version, "VERSION") == 0);
+    assert(NEINKEmbeddedKeychainProfile.got_address == GOT_ADDRESS);
+    assert(NEINKEmbeddedKeychainProfile.got_offset == GOT_OFFSET);
+    assert(NEINKEmbeddedKeychainProfile.authentication_site_count == 6);
+    assert(NEINKEmbeddedKeychainProfile.e2ee_site_count == 1);
+    assert(NEINKKeychainProfileHasCallSite(
+        NEINKEmbeddedKeychainProfile.authentication_sites,
+        NEINKEmbeddedKeychainProfile.authentication_site_count,
+        NEINK_KEYCHAIN_ADD, AUTH_SITE));
+    assert(NEINKKeychainProfileHasCallSite(
+        NEINKEmbeddedKeychainProfile.e2ee_sites,
+        NEINKEmbeddedKeychainProfile.e2ee_site_count,
+        NEINK_KEYCHAIN_COPY, E2EE_SITE));
     return 0;
 }
 '''
@@ -131,7 +131,7 @@ int main(void) {
                 )
                 with tempfile.TemporaryDirectory() as directory:
                     root = Path(directory)
-                    (root / 'LINEKeychainProfileData.h').write_text(
+                    (root / 'NEINKeychainProfileData.h').write_text(
                         header, encoding='utf-8',
                     )
                     c_file = root / 'profile_test.c'

@@ -2,47 +2,47 @@
 // request/response bodies, Keychain queries, account identifiers, or secrets.
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
-#include "LINEAppGroups.h"
+#include "NEINAppGroups.h"
 #include <dlfcn.h>
 #include <execinfo.h>
 #include <stdatomic.h>
 #include <string.h>
 #include <os/log.h>
 
-static _Thread_local BOOL LMDLogging;
-static atomic_uint LMDErrorCount, LMDLocalizationCount, LMDContainerCount;
-static NSString * const LMDVersion = @"v7";
-static const unsigned LMDMaximumEventCount = 80;
-static const unsigned LMDMaximumDuplicateCount = 3;
-static const NSUInteger LMDMaximumErrorKeys = 512;
+static _Thread_local BOOL NEINDLogging;
+static atomic_uint NEINDErrorCount, NEINDLocalizationCount, NEINDContainerCount;
+static NSString * const NEINDVersion = @"v7";
+static const unsigned NEINDMaximumEventCount = 80;
+static const unsigned NEINDMaximumDuplicateCount = 3;
+static const NSUInteger NEINDMaximumErrorKeys = 512;
 
-static BOOL LMDBeginLogging(void) {
-    if (LMDLogging) return NO;
-    LMDLogging = YES;
+static BOOL NEINDBeginLogging(void) {
+    if (NEINDLogging) return NO;
+    NEINDLogging = YES;
     return YES;
 }
 
-static void LMDEndLogging(void) {
-    LMDLogging = NO;
+static void NEINDEndLogging(void) {
+    NEINDLogging = NO;
 }
 
 // Callers pass only sanitized fields. Explicit public visibility is necessary:
 // NSLog's interpolated strings were redacted on the user's iOS 27 device.
-static void LMDEmit(NSString *message) {
+static void NEINDEmit(NSString *message) {
     os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, "%{public}@", message);
-#ifdef LINE_DIAGNOSTICS_TESTING
+#ifdef NEIN_DIAGNOSTICS_TESTING
     // Test-only capture of exactly the string sent to unified logging.
     fprintf(stderr, "%s\n", message.UTF8String);
 #endif
 }
 
-static BOOL LMDInterestingKey(NSString *key) {
+static BOOL NEINDInterestingKey(NSString *key) {
     return [@[@"common.error.applicationError", @"common.error.systemError",
               @"common.error.unknownError", @"authorize.dt.loginerror.general",
               @"authorize.e2ee.error"] containsObject:key ?: @""];
 }
 
-static NSString *LMDSafeDomain(NSString *domain) {
+static NSString *NEINDSafeDomain(NSString *domain) {
     // Only fixed, known domains are emitted. Unknown domains may contain data.
     static NSSet<NSString *> *allowed;
     static dispatch_once_t once;
@@ -67,11 +67,11 @@ static NSString *LMDSafeDomain(NSString *domain) {
     return [allowed containsObject:domain ?: @""] ? domain : @"other-redacted";
 }
 
-static NSString *LMDSafeGroup(NSString *identifier) {
-    return LMIsLINEAppGroup(identifier) ? identifier : @"other-redacted";
+static NSString *NEINDSafeGroup(NSString *identifier) {
+    return NEINIsLINEAppGroup(identifier) ? identifier : @"other-redacted";
 }
 
-static NSString *LMDLINEFrames(void) {
+static NSString *NEINDLINEFrames(void) {
     void *frames[32];
     int count = backtrace(frames, 32);
     NSMutableArray *offsets = [NSMutableArray array];
@@ -87,7 +87,7 @@ static NSString *LMDLINEFrames(void) {
     return [offsets componentsJoinedByString:@","];
 }
 
-static BOOL LMDShouldEmitError(NSString *domain, NSInteger code, NSString *frames) {
+static BOOL NEINDShouldEmitError(NSString *domain, NSInteger code, NSString *frames) {
     static NSLock *lock;
     static NSMutableDictionary<NSString *, NSNumber *> *counts;
     static dispatch_once_t once;
@@ -97,71 +97,71 @@ static BOOL LMDShouldEmitError(NSString *domain, NSInteger code, NSString *frame
     [lock lock];
     NSNumber *previous = counts[key];
     BOOL emit = previous
-        ? previous.unsignedIntValue < LMDMaximumDuplicateCount
-        : counts.count < LMDMaximumErrorKeys;
+        ? previous.unsignedIntValue < NEINDMaximumDuplicateCount
+        : counts.count < NEINDMaximumErrorKeys;
     if (emit) counts[key] = @(previous.unsignedIntValue + 1);
     [lock unlock];
     return emit;
 }
 
-static void LMDLogError(NSString *domain, NSInteger code, const char *origin) {
-    if (!LMDBeginLogging()) return;
-    NSString *frames = LMDLINEFrames();
-    if (LMDShouldEmitError(domain, code, frames)) {
-        atomic_fetch_add(&LMDErrorCount, 1);
-        LMDEmit([NSString stringWithFormat:@"[LINELoginDiag] error origin=%s domain=%@ code=%ld frames=%@",
-              origin, LMDSafeDomain(domain), (long)code, frames]);
+static void NEINDLogError(NSString *domain, NSInteger code, const char *origin) {
+    if (!NEINDBeginLogging()) return;
+    NSString *frames = NEINDLINEFrames();
+    if (NEINDShouldEmitError(domain, code, frames)) {
+        atomic_fetch_add(&NEINDErrorCount, 1);
+        NEINDEmit([NSString stringWithFormat:@"[NEINLoginDiag] error origin=%s domain=%@ code=%ld frames=%@",
+              origin, NEINDSafeDomain(domain), (long)code, frames]);
     }
-    LMDEndLogging();
+    NEINDEndLogging();
 }
 
-static void LMDLogContainer(NSString *identifier, BOOL original, BOOL fallback) {
-    if (!LMDBeginLogging()) return;
-    if (atomic_fetch_add(&LMDContainerCount, 1) < LMDMaximumEventCount) {
-        LMDEmit([NSString stringWithFormat:@"[LINELoginDiag] container group=%@ original=%d fallback=%d frames=%@",
-              LMDSafeGroup(identifier), original, fallback, LMDLINEFrames()]);
+static void NEINDLogContainer(NSString *identifier, BOOL original, BOOL fallback) {
+    if (!NEINDBeginLogging()) return;
+    if (atomic_fetch_add(&NEINDContainerCount, 1) < NEINDMaximumEventCount) {
+        NEINDEmit([NSString stringWithFormat:@"[NEINLoginDiag] container group=%@ original=%d fallback=%d frames=%@",
+              NEINDSafeGroup(identifier), original, fallback, NEINDLINEFrames()]);
     }
-    LMDEndLogging();
+    NEINDEndLogging();
 }
 
-typedef NSString *(*LMDLocalizedIMP)(id, SEL, NSString *, NSString *, NSString *);
-static LMDLocalizedIMP LMDOriginalLocalized;
-static NSString *LMDLocalized(id receiver, SEL selector, NSString *key,
+typedef NSString *(*NEINDLocalizedIMP)(id, SEL, NSString *, NSString *, NSString *);
+static NEINDLocalizedIMP NEINDOriginalLocalized;
+static NSString *NEINDLocalized(id receiver, SEL selector, NSString *key,
                               NSString *value, NSString *table) {
-    NSString *result = LMDOriginalLocalized(receiver, selector, key, value, table);
-    if (LMDInterestingKey(key) && LMDBeginLogging()) {
-        if (atomic_fetch_add(&LMDLocalizationCount, 1) < LMDMaximumEventCount)
-            LMDEmit([NSString stringWithFormat:@"[LINELoginDiag] error-text key=%@ frames=%@", key, LMDLINEFrames()]);
-        LMDEndLogging();
+    NSString *result = NEINDOriginalLocalized(receiver, selector, key, value, table);
+    if (NEINDInterestingKey(key) && NEINDBeginLogging()) {
+        if (atomic_fetch_add(&NEINDLocalizationCount, 1) < NEINDMaximumEventCount)
+            NEINDEmit([NSString stringWithFormat:@"[NEINLoginDiag] error-text key=%@ frames=%@", key, NEINDLINEFrames()]);
+        NEINDEndLogging();
     }
     return result;
 }
 
 // Match init-family ARC ownership: receiver is consumed, result is retained.
-typedef id (*LMDErrorInitIMP)(id __attribute__((ns_consumed)), SEL,
+typedef id (*NEINDErrorInitIMP)(id __attribute__((ns_consumed)), SEL,
                              NSString *, NSInteger, NSDictionary *)
                              __attribute__((ns_returns_retained));
-static LMDErrorInitIMP LMDOriginalErrorInit;
-static id LMDErrorInit(id receiver __attribute__((ns_consumed)), SEL selector,
+static NEINDErrorInitIMP NEINDOriginalErrorInit;
+static id NEINDErrorInit(id receiver __attribute__((ns_consumed)), SEL selector,
                       NSString *domain, NSInteger code, NSDictionary *userInfo)
                       __attribute__((ns_returns_retained));
-static id LMDErrorInit(id receiver __attribute__((ns_consumed)), SEL selector,
+static id NEINDErrorInit(id receiver __attribute__((ns_consumed)), SEL selector,
                       NSString *domain, NSInteger code, NSDictionary *userInfo) {
-    id result = LMDOriginalErrorInit(receiver, selector, domain, code, userInfo);
-    LMDLogError(domain, code, "init");
+    id result = NEINDOriginalErrorInit(receiver, selector, domain, code, userInfo);
+    NEINDLogError(domain, code, "init");
     return result;
 }
 
-typedef id (*LMDErrorFactoryIMP)(id, SEL, NSString *, NSInteger, NSDictionary *);
-static LMDErrorFactoryIMP LMDOriginalErrorFactory;
-static id LMDErrorFactory(id receiver, SEL selector, NSString *domain,
+typedef id (*NEINDErrorFactoryIMP)(id, SEL, NSString *, NSInteger, NSDictionary *);
+static NEINDErrorFactoryIMP NEINDOriginalErrorFactory;
+static id NEINDErrorFactory(id receiver, SEL selector, NSString *domain,
                          NSInteger code, NSDictionary *userInfo) {
-    id result = LMDOriginalErrorFactory(receiver, selector, domain, code, userInfo);
-    LMDLogError(domain, code, "factory");
+    id result = NEINDOriginalErrorFactory(receiver, selector, domain, code, userInfo);
+    NEINDLogError(domain, code, "factory");
     return result;
 }
 
-static void LMInstallLoginDiagnostics(void) {
+static void NEINInstallLoginDiagnostics(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         Method localized = class_getInstanceMethod(NSBundle.class,
@@ -171,17 +171,17 @@ static void LMInstallLoginDiagnostics(void) {
         Method errorFactory = class_getClassMethod(NSError.class,
                              @selector(errorWithDomain:code:userInfo:));
         if (!localized || !errorInit || !errorFactory) {
-            LMDEmit(@"[LINELoginDiag] required methods unavailable; diagnostics skipped");
+            NEINDEmit(@"[NEINLoginDiag] required methods unavailable; diagnostics skipped");
             return;
         }
-        LMDOriginalLocalized = (LMDLocalizedIMP)method_getImplementation(localized);
-        LMDOriginalErrorInit = (LMDErrorInitIMP)method_getImplementation(errorInit);
-        LMDOriginalErrorFactory = (LMDErrorFactoryIMP)method_getImplementation(errorFactory);
-        method_setImplementation(localized, (IMP)LMDLocalized);
-        method_setImplementation(errorInit, (IMP)LMDErrorInit);
-        method_setImplementation(errorFactory, (IMP)LMDErrorFactory);
-        LMDEmit([NSString stringWithFormat:
-            @"[LINELoginDiag] %@ diagnostics loaded; public sanitized fields; duplicate errors limited",
-            LMDVersion]);
+        NEINDOriginalLocalized = (NEINDLocalizedIMP)method_getImplementation(localized);
+        NEINDOriginalErrorInit = (NEINDErrorInitIMP)method_getImplementation(errorInit);
+        NEINDOriginalErrorFactory = (NEINDErrorFactoryIMP)method_getImplementation(errorFactory);
+        method_setImplementation(localized, (IMP)NEINDLocalized);
+        method_setImplementation(errorInit, (IMP)NEINDErrorInit);
+        method_setImplementation(errorFactory, (IMP)NEINDErrorFactory);
+        NEINDEmit([NSString stringWithFormat:
+            @"[NEINLoginDiag] %@ diagnostics loaded; public sanitized fields; duplicate errors limited",
+            NEINDVersion]);
     });
 }

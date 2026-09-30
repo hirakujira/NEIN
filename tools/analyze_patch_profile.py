@@ -1049,36 +1049,36 @@ def render_c_header(profile):
     if len(profile['authentication_sites']) > 64 or len(profile['e2ee_sites']) > 64:
         raise ValueError('Too many Keychain sites for a generated C profile.')
     lines = [
-        '#ifndef LINE_KEYCHAIN_PROFILE_DATA_H',
-        '#define LINE_KEYCHAIN_PROFILE_DATA_H',
+        '#ifndef NEIN_KEYCHAIN_PROFILE_DATA_H',
+        '#define NEIN_KEYCHAIN_PROFILE_DATA_H',
         '',
-        'static const unsigned char LMKEmbeddedKeychainUUID[16] = {',
+        'static const unsigned char NEINKEmbeddedKeychainUUID[16] = {',
         '    ' + ', '.join(f'0x{byte:02x}' for byte in uuid) + ',',
         '};',
     ]
     for key, array_name in (
-        ('authentication_sites', 'LMKEmbeddedAuthenticationSites'),
-        ('e2ee_sites', 'LMKEmbeddedE2EESites'),
+        ('authentication_sites', 'NEINKEmbeddedAuthenticationSites'),
+        ('e2ee_sites', 'NEINKEmbeddedE2EESites'),
     ):
-        lines.append(f'static const LMKKeychainCallSite {array_name}[] = {{')
+        lines.append(f'static const NEINKKeychainCallSite {array_name}[] = {{')
         for site in profile[key]:
             operation = site['operation'].upper()
             lines.append(
-                f"    {{LMK_KEYCHAIN_{operation}, "
+                f"    {{NEINK_KEYCHAIN_{operation}, "
                 f"{int(site['return_offset'], 16):#x}ULL}},"
             )
         lines.append('};')
     lines.extend([
         '',
-        'static const LMKKeychainProfile LMKEmbeddedKeychainProfile = {',
+        'static const NEINKKeychainProfile NEINKEmbeddedKeychainProfile = {',
         f'    {json.dumps(profile["version"])},',
-        '    LMKEmbeddedKeychainUUID,',
+        '    NEINKEmbeddedKeychainUUID,',
         f'    {got_address:#x}ULL,',
         f'    {got_offset:#x}ULL,',
-        '    LMKEmbeddedAuthenticationSites,',
-        '    sizeof(LMKEmbeddedAuthenticationSites) / sizeof(LMKEmbeddedAuthenticationSites[0]),',
-        '    LMKEmbeddedE2EESites,',
-        '    sizeof(LMKEmbeddedE2EESites) / sizeof(LMKEmbeddedE2EESites[0]),',
+        '    NEINKEmbeddedAuthenticationSites,',
+        '    sizeof(NEINKEmbeddedAuthenticationSites) / sizeof(NEINKEmbeddedAuthenticationSites[0]),',
+        '    NEINKEmbeddedE2EESites,',
+        '    sizeof(NEINKEmbeddedE2EESites) / sizeof(NEINKEmbeddedE2EESites[0]),',
         '};',
         '',
         '#endif',

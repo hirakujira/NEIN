@@ -64,11 +64,11 @@ enum { UIUserInterfaceLayoutDirectionLeftToRight = 0 };
 @end
 @implementation UITabBar @end
 
-#include "../hooks/LINEPromotionalTabs.h"
-#include "../hooks/LINEVisibleTabModel.h"
-#include "../hooks/LINECompactTabs.h"
-#define LM_TAB_DIAGNOSTICS_SNAPSHOT_ONLY 1
-#include "../hooks/LINETabDiagnostics.h"
+#include "../hooks/NEINPromotionalTabs.h"
+#include "../hooks/NEINVisibleTabModel.h"
+#include "../hooks/NEINCompactTabs.h"
+#define NEIN_TAB_DIAGNOSTICS_SNAPSHOT_ONLY 1
+#include "../hooks/NEINTabDiagnostics.h"
 
 static UIView *TestView(NSString *name, BOOL control, CGRect frame) {
     Class cls = NSClassFromString(name);
@@ -102,7 +102,7 @@ static void TestCompactLayout(NSUInteger count, CGFloat width) {
             UIControl *button = (UIControl *)TestView(@"_UITabButton", YES, frame);
             button.enabled = i != 2;
             button.hidden = i == 2;
-            if (i == 2) objc_setAssociatedObject(button, &LMTabOriginalHiddenKey, @NO,
+            if (i == 2) objc_setAssociatedObject(button, &NEINTabOriginalHiddenKey, @NO,
                                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             [row addObject:button];
         }
@@ -118,7 +118,7 @@ static void TestCompactLayout(NSUInteger count, CGFloat width) {
     bar.items = items;
     bar.selectedItem = items[1];
     CGFloat expected = step * (count - 1) / (count - 2) - step;
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     assert(fabs(((UIView *)buttons[1]).transform.tx - expected) < 0.001);
     assert(fabs(((UIView *)copies[1]).transform.tx - expected) < 0.001);
     assert(fabs(lens.transform.tx - expected) < 0.001);
@@ -127,119 +127,119 @@ static void TestCompactLayout(NSUInteger count, CGFloat width) {
     assert(CGAffineTransformIsIdentity(platter.transform));
     UIView *portal = TestView(@"_UIPortalView", NO, CGRectZero);
     bar.subviews = @[portal, platter]; // Report 2: zero-sized portal is a sibling.
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     assert(fabs(lens.transform.tx - expected) < 0.001);
     assert(CGAffineTransformIsIdentity(portal.transform));
     portal.frame = CGRectMake(0, 0, 1, 1);
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     assert(CGAffineTransformIsIdentity(lens.transform)); // Nonzero portal is unknown.
     portal.frame = CGRectZero;
     bar.subviews = @[platter, [UIView new]];
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     assert(CGAffineTransformIsIdentity(lens.transform));
     bar.subviews = @[platter, platter];
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     assert(CGAffineTransformIsIdentity(lens.transform));
     bar.subviews = @[platter, portal];
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     assert(fabs(lens.transform.tx - expected) < 0.001); // No accumulation.
     CGRect original = lens.frame;
     // Report 3: UIKit updates the base position after we applied a translation.
     lens.frame = CGRectOffset(original, expected, 0);
-    LMCompactAlignLens(lens, items[1]);
+    NEINCompactAlignLens(lens, items[1]);
     assert(fabs(lens.transform.tx) < 0.001);
     assert(fabs(lens.center.x + lens.transform.tx -
                 (((UIView *)buttons[1]).center.x + expected)) < 0.001);
-    LMCompactAlignLens(lens, items[1]);
+    NEINCompactAlignLens(lens, items[1]);
     assert(fabs(lens.transform.tx) < 0.001);
     lens.frame = original;
-    LMCompactAlignLens(lens, items[1]);
+    NEINCompactAlignLens(lens, items[1]);
     assert(fabs(lens.transform.tx - expected) < 0.001);
     lens.frame = CGRectOffset(original, 1, 0);
-    LMCompactAlignLens(lens, items.lastObject); // Stale target after selection changes.
+    NEINCompactAlignLens(lens, items.lastObject); // Stale target after selection changes.
     assert(fabs(lens.transform.tx - expected) < 0.001);
     lens.frame = original;
-    LMCompactRestore(bar);
-    LMCompactAlignLens(lens, items[1]); // No target survives restore.
+    NEINCompactRestore(bar);
+    NEINCompactAlignLens(lens, items[1]); // No target survives restore.
     assert(CGAffineTransformIsIdentity(lens.transform));
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     lens.frame = CGRectOffset(original, 1, 0);
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     assert(fabs(lens.transform.tx - (expected - 1)) < 0.001);
     assert(fabs(badge.transform.tx - expected) < 0.001);
     // Reproduce the reported stale hidden-slot lens with floating-point noise.
     lens.frame = CGRectOffset(((UIView *)buttons[2]).frame, 0.00000000000003, 0);
     lens.bounds = CGRectMake(0, 0, buttonWidth + 0.00000000000003, 54);
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     assert(fabs(lens.center.x + lens.transform.tx -
                 (((UIView *)buttons[1]).center.x + expected)) < 0.001);
     assert(fabs(((UIView *)buttons[1]).transform.tx - expected) < 0.001);
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     assert(fabs(lens.center.x + lens.transform.tx -
                 (((UIView *)buttons[1]).center.x + expected)) < 0.001);
     lens.frame = original;
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     CGRect badgeFrame = badge.frame;
     badge.frame = CGRectMake(((UIView *)buttons[1]).center.x + step / 2 - 8,
                               10, 16, 16);
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     assert(CGAffineTransformIsIdentity(lens.transform)); // Ambiguous badge.
     badge.frame = badgeFrame;
     lens.frame = ((UIView *)buttons.lastObject).frame;
     bar.selectedItem = items.lastObject;
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     assert(fabs(lens.transform.tx) < 0.001); // Last tab stays at the right edge.
     assert(fabs(((UIView *)buttons[1]).transform.tx - expected) < 0.001);
     lens.frame = original;
     bar.selectedItem = items[1];
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     ((UIView *)buttons[1]).transform = CGAffineTransformMakeScale(0.9, 0.9);
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     assert(((UIView *)buttons[1]).transform.a == 0.9); // Preserve external transforms.
     assert(CGAffineTransformIsIdentity(lens.transform));
     ((UIView *)buttons[1]).transform = CGAffineTransformIdentity;
     bar.selectedItem = items[2]; // Never force a hidden selected item elsewhere.
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     assert(CGAffineTransformIsIdentity(lens.transform));
     assert(lens.hidden);
     assert(fabs(((UIView *)buttons[1]).transform.tx - expected) < 0.001);
     assert(fabs(badge.transform.tx - expected) < 0.001);
     assert(bar.selectedItem == items[2]);
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     assert(lens.hidden);
-    LMCompactTabsForSelection(bar, items[1]); // Controller and bar disagree.
+    NEINCompactTabsForSelection(bar, items[1]); // Controller and bar disagree.
     assert(!lens.hidden);
     assert(fabs(lens.transform.tx - expected) < 0.001);
     assert(bar.selectedItem == items[2]); // No selection setters invoked.
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     lens.hidden = YES;
-    LMCompactRestore(bar);
+    NEINCompactRestore(bar);
     lens.hidden = YES; // Preserve a pre-existing hidden selection background.
-    LMCompactTabs(bar);
-    LMCompactTabsForSelection(bar, items[1]);
+    NEINCompactTabs(bar);
+    NEINCompactTabsForSelection(bar, items[1]);
     assert(lens.hidden);
-    LMCompactRestore(bar);
+    NEINCompactRestore(bar);
     lens.hidden = NO;
     bar.selectedItem = [UITabBarItem new];
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     assert(CGAffineTransformIsIdentity(lens.transform));
     assert(!lens.hidden);
     bar.selectedItem = nil;
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     assert(CGAffineTransformIsIdentity(lens.transform));
     bar.selectedItem = items[1];
     bar.effectiveUserInterfaceLayoutDirection = 1;
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     assert(CGAffineTransformIsIdentity(lens.transform));
     bar.effectiveUserInterfaceLayoutDirection = 0;
     bar.items = @[items[0], items[1]];
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     assert(CGAffineTransformIsIdentity(lens.transform));
     bar.items = items;
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     ((UIControl *)buttons[2]).hidden = NO;
     ((UIControl *)copies[2]).hidden = NO;
-    LMCompactTabs(bar);
+    NEINCompactTabs(bar);
     assert(CGAffineTransformIsIdentity(lens.transform));
     assert(normal.subviews.count == count && selected.subviews.count == count);
 }
@@ -252,31 +252,33 @@ int main(void) {
             item.title = title;
             [nativeItems addObject:item];
         }
+        assert(NEINIsMainLineTabBar(nativeItems));
+        assert(!NEINIsMainLineTabBar(@[nativeItems[0], nativeItems[1]]));
         NSArray *nativeSnapshot = [nativeItems copy];
-        assert(([LMVisibleTabIndices(nativeItems) isEqualToArray:@[@0, @1, @3]]));
-        assert(LMVisibleTabDestination(nativeItems, 1, 2) == 3);
-        assert(LMVisibleTabDestination(nativeItems, 3, 2) == 1);
-        assert(LMVisibleTabDestination(nativeItems, 1, 1) == 1);
-        assert(LMVisibleTabDestination(nativeItems, NSNotFound, 2) == 3);
-        assert(LMVisibleTabDestination(nativeItems, 1, NSNotFound) == NSNotFound);
-        assert(LMVisibleTabDestination(@[], 0, 0) == NSNotFound);
+        assert(([NEINVisibleTabIndices(nativeItems) isEqualToArray:@[@0, @1, @3]]));
+        assert(NEINVisibleTabDestination(nativeItems, 1, 2) == 3);
+        assert(NEINVisibleTabDestination(nativeItems, 3, 2) == 1);
+        assert(NEINVisibleTabDestination(nativeItems, 1, 1) == 1);
+        assert(NEINVisibleTabDestination(nativeItems, NSNotFound, 2) == 3);
+        assert(NEINVisibleTabDestination(nativeItems, 1, NSNotFound) == NSNotFound);
+        assert(NEINVisibleTabDestination(@[], 0, 0) == NSNotFound);
         nativeItems[3].enabled = NO;
-        assert(LMVisibleTabDestination(nativeItems, 1, 2) == 1);
+        assert(NEINVisibleTabDestination(nativeItems, 1, 2) == 1);
         nativeItems[1].title = @"NEWS";
-        assert(([LMVisibleTabIndices(nativeItems) isEqualToArray:@[@0, @3]]));
-        assert(LMVisibleTabDestination(nativeItems, 3, 2) == 0);
+        assert(([NEINVisibleTabIndices(nativeItems) isEqualToArray:@[@0, @3]]));
+        assert(NEINVisibleTabDestination(nativeItems, 3, 2) == 0);
         nativeItems[0].title = @"SHOPPING";
-        assert(LMVisibleTabDestination(nativeItems, 1, 2) == NSNotFound);
+        assert(NEINVisibleTabDestination(nativeItems, 1, 2) == NSNotFound);
         assert([nativeItems isEqualToArray:nativeSnapshot]); // Same model objects/order.
         UITabBarItem *partial = [UITabBarItem new];
         partial.title = @"VOOM settings";
-        assert(!LMVisibleTabIsPromotional(partial));
-        assert(LMVisibleTabIsPromotional([VOOMSkinnedTabBarItem new]));
-        assert(LMCompactRectNear(CGRectMake(0, 0, 98, 54),
+        assert(!NEINVisibleTabIsPromotional(partial));
+        assert(NEINVisibleTabIsPromotional([VOOMSkinnedTabBarItem new]));
+        assert(NEINCompactRectNear(CGRectMake(0, 0, 98, 54),
                                 CGRectMake(0.1, 0, 98.00000000000003, 54)));
-        assert(!LMCompactRectNear(CGRectMake(0, 0, 98, 54),
+        assert(!NEINCompactRectNear(CGRectMake(0, 0, 98, 54),
                                  CGRectMake(0.6, 0, 98, 54)));
-        assert(!LMCompactNear(NAN, 0));
+        assert(!NEINCompactNear(NAN, 0));
         TestCompactLayout(4, 360);
         TestCompactLayout(5, 360);
         TestCompactLayout(4, 600);
@@ -287,27 +289,27 @@ int main(void) {
             [items addObject:item];
         }
         NSArray *originalItems = [items copy];
-        LMUpdatePromotionalItems(items);
-        LMUpdatePromotionalItems(items); // Repeated layouts preserve original state.
+        NEINUpdatePromotionalItems(items);
+        NEINUpdatePromotionalItems(items); // Repeated layouts preserve original state.
         assert([items isEqualToArray:originalItems]);
         for (NSUInteger i = 0; i < items.count; i++) {
             assert(items[i].enabled == (i < 3));
         }
         assert([items[3].title isEqualToString:@"VOOM"]);
         items[3].title = @"設定";
-        LMUpdatePromotionalItems(items);
+        NEINUpdatePromotionalItems(items);
         assert(items[3].enabled);
         items[3].enabled = NO;
         items[3].title = @"VOOM";
-        LMUpdatePromotionalItems(items);
+        NEINUpdatePromotionalItems(items);
         items[3].title = @"設定";
-        LMUpdatePromotionalItems(items);
+        NEINUpdatePromotionalItems(items);
         assert(!items[3].enabled); // Do not enable an originally disabled item.
         VOOMSkinnedTabBarItem *voomItem = [VOOMSkinnedTabBarItem new];
         UITabBarItem *unknownItem = [UITabBarItem new];
         UITabBarItem *partialTitleItem = [UITabBarItem new];
         partialTitleItem.title = @"VOOM settings";
-        LMUpdatePromotionalItems(@[voomItem, unknownItem, partialTitleItem]);
+        NEINUpdatePromotionalItems(@[voomItem, unknownItem, partialTitleItem]);
         assert(!voomItem.enabled && unknownItem.enabled && partialTitleItem.enabled);
         UIView *bar = [UIView new];
         UIControl *shared = [UIControl new];
@@ -319,54 +321,54 @@ int main(void) {
         }
         shared.subviews = buttons;
         bar.subviews = @[shared];
-        LMUpdatePromotionalButtons(bar);
+        NEINUpdatePromotionalButtons(bar);
         assert(!bar.hidden && !shared.hidden);
         for (NSUInteger i = 0; i < buttons.count; i++) {
             assert(((UIButton *)buttons[i]).hidden == (i >= 3));
         }
         UIButton *reused = buttons[3];
         reused.currentTitle = @"聊天";
-        LMUpdatePromotionalButtons(bar);
+        NEINUpdatePromotionalButtons(bar);
         assert(!reused.hidden);
         reused.currentTitle = nil;
         UILabel *label = [UILabel new];
         label.text = @" VOOM ";
         reused.subviews = @[label];
-        LMUpdatePromotionalButtons(bar);
+        NEINUpdatePromotionalButtons(bar);
         assert(reused.hidden && !label.hidden && !shared.hidden);
         label.text = @"VOOM settings";
-        LMUpdatePromotionalButtons(bar);
+        NEINUpdatePromotionalButtons(bar);
         assert(!reused.hidden);
         label.text = nil;
         label.attributedText = [[NSAttributedString alloc] initWithString:@"LINE VOOM"];
-        LMUpdatePromotionalButtons(bar);
+        NEINUpdatePromotionalButtons(bar);
         assert(reused.hidden);
         label.attributedText = nil;
         reused.currentAttributedTitle = [[NSAttributedString alloc] initWithString:@"NEWS"];
-        LMUpdatePromotionalButtons(bar);
+        NEINUpdatePromotionalButtons(bar);
         assert(reused.hidden);
         reused.currentAttributedTitle = nil;
-        LMUpdatePromotionalButtons(bar);
+        NEINUpdatePromotionalButtons(bar);
         assert(!reused.hidden);
         reused.hidden = YES;
         reused.accessibilityLabel = @"VOOM";
-        LMUpdatePromotionalButtons(bar);
+        NEINUpdatePromotionalButtons(bar);
         reused.accessibilityLabel = nil;
-        LMUpdatePromotionalButtons(bar);
+        NEINUpdatePromotionalButtons(bar);
         assert(reused.hidden); // Preserve LINE's pre-existing hidden state.
         reused.hidden = NO;
         label.text = @"VOOM";
         UILabel *home = [UILabel new];
         home.text = @"首頁";
         reused.subviews = @[label, home];
-        LMUpdatePromotionalButtons(bar);
+        NEINUpdatePromotionalButtons(bar);
         assert(!reused.hidden); // A container with mixed tab labels is ambiguous.
-        assert(!LMExactPromotionalTitle(nil));
+        assert(!NEINExactPromotionalTitle(nil));
         assert(bar.subviews.count == 1 && shared.subviews.count == 6);
         label.text = @"PRIVATE_TEST_TEXT";
         label.accessibilityLabel = @"PRIVATE_TEST_ACCESSIBILITY";
         NSUInteger budget = 512;
-        NSDictionary *snapshot = LMTDView(bar, 0, &budget);
+        NSDictionary *snapshot = NEINTDView(bar, 0, &budget);
         NSData *json = [NSJSONSerialization dataWithJSONObject:snapshot options:0 error:NULL];
         assert(json != nil);
         NSString *serialized = [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
@@ -374,10 +376,10 @@ int main(void) {
         assert([snapshot[@"child_count"] unsignedIntegerValue] == 1);
         assert([snapshot[@"children"] count] == 1);
         budget = 1;
-        snapshot = LMTDView(bar, 0, &budget);
+        snapshot = NEINTDView(bar, 0, &budget);
         assert(budget == 0 && [snapshot[@"children"] count] == 0);
         budget = 512;
-        snapshot = LMTDView(bar, 21, &budget);
+        snapshot = NEINTDView(bar, 21, &budget);
         assert([snapshot[@"truncated"] boolValue]);
         puts("Promotional tab selection regression tests passed (view doubles).");
     }

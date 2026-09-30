@@ -1,22 +1,22 @@
 // Diagnostic-only export. Never serialize view descriptions, labels, images,
 // identifiers, badge values, constraints or any views outside the tab bar.
-static NSArray *LMTDRect(CGRect rect) {
+static NSArray *NEINTDRect(CGRect rect) {
     return @[@(rect.origin.x), @(rect.origin.y),
              @(rect.size.width), @(rect.size.height)];
 }
 
-static NSDictionary *LMTDView(UIView *view, NSUInteger depth, NSUInteger *remaining) {
+static NSDictionary *NEINTDView(UIView *view, NSUInteger depth, NSUInteger *remaining) {
     if (!*remaining || depth > 20) return @{@"truncated": @YES};
     --*remaining;
     NSMutableArray *children = [NSMutableArray new];
     for (UIView *child in view.subviews) {
         if (!*remaining) break;
-        [children addObject:LMTDView(child, depth + 1, remaining)];
+        [children addObject:NEINTDView(child, depth + 1, remaining)];
     }
     NSMutableDictionary *node = [@{
         @"class": NSStringFromClass(view.class),
-        @"frame_in_parent": LMTDRect(view.frame),
-        @"bounds": LMTDRect(view.bounds),
+        @"frame_in_parent": NEINTDRect(view.frame),
+        @"bounds": NEINTDRect(view.bounds),
         @"hidden": @(view.hidden),
         @"alpha": @(view.alpha),
         @"interactive": @(view.userInteractionEnabled),
@@ -31,19 +31,19 @@ static NSDictionary *LMTDView(UIView *view, NSUInteger depth, NSUInteger *remain
     return node;
 }
 
-#ifndef LM_TAB_DIAGNOSTICS_SNAPSHOT_ONLY
-@interface LMTabDiagnosticExporter : NSObject
+#ifndef NEIN_TAB_DIAGNOSTICS_SNAPSHOT_ONLY
+@interface NEINTabDiagnosticExporter : NSObject
 @property(nonatomic, weak) UITabBarController *controller;
 @property(nonatomic, strong) UIButton *button;
 - (void)exportSnapshot;
 @end
 
-@implementation LMTabDiagnosticExporter
+@implementation NEINTabDiagnosticExporter
 - (void)exportSnapshot {
     UITabBarController *controller = self.controller;
     if (!controller.viewIfLoaded.window || controller.presentedViewController) return;
     NSUInteger remaining = 512;
-    LMVisibleTabBar *presentation = objc_getAssociatedObject(controller, &LMVisibleTabBarKey);
+    NEINVisibleTabBar *presentation = objc_getAssociatedObject(controller, &NEINVisibleTabBarKey);
     NSMutableArray *items = [NSMutableArray new];
     for (UITabBarItem *item in controller.tabBar.items) {
         [items addObject:@{@"class": NSStringFromClass(item.class),
@@ -53,12 +53,12 @@ static NSDictionary *LMTDView(UIView *view, NSUInteger depth, NSUInteger *remain
         @"schema": @1,
         @"build": @"v17-home-settings",
         @"phase": @"native_presentation",
-        @"tab_bar": LMTDView(controller.tabBar, 0, &remaining),
+        @"tab_bar": NEINTDView(controller.tabBar, 0, &remaining),
         @"items": items,
         @"presentation_active": @(presentation.active),
         @"presentation_indices": presentation.indices ?: @[],
         @"presentation_tab_bar": presentation.active
-            ? LMTDView(presentation.bar, 0, &remaining) : @{},
+            ? NEINTDView(presentation.bar, 0, &remaining) : @{},
         @"selected_item_index": controller.tabBar.selectedItem
             ? @([controller.tabBar.items indexOfObjectIdenticalTo:controller.tabBar.selectedItem])
             : @(-1),
@@ -99,11 +99,11 @@ static NSDictionary *LMTDView(UIView *view, NSUInteger depth, NSUInteger *remain
 }
 @end
 
-static char LMTDExporterKey;
+static char NEINTDExporterKey;
 
-static void LMInstallTabDiagnosticButton(UITabBarController *controller) {
-    if (objc_getAssociatedObject(controller, &LMTDExporterKey)) return;
-    LMTabDiagnosticExporter *exporter = [LMTabDiagnosticExporter new];
+static void NEINInstallTabDiagnosticButton(UITabBarController *controller) {
+    if (objc_getAssociatedObject(controller, &NEINTDExporterKey)) return;
+    NEINTabDiagnosticExporter *exporter = [NEINTabDiagnosticExporter new];
     exporter.controller = controller;
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
     UIButtonConfiguration *configuration = UIButtonConfiguration.filledButtonConfiguration;
@@ -113,7 +113,7 @@ static void LMInstallTabDiagnosticButton(UITabBarController *controller) {
     [button addTarget:exporter action:@selector(exportSnapshot)
         forControlEvents:UIControlEventTouchUpInside];
     exporter.button = button;
-    objc_setAssociatedObject(controller, &LMTDExporterKey, exporter,
+    objc_setAssociatedObject(controller, &NEINTDExporterKey, exporter,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     UIView *view = controller.view;
     [view addSubview:button];

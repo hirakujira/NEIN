@@ -46,8 +46,6 @@ python3 tools/main.py --keychain-compat --remove-ads --hide-promotional-tabs \
 python3 tools/scan_ad_domains.py jp.naver.line_26.15.1.ipa ad_domains.txt
 ```
 
-若要改用 IPA 內其他替代圖示，可以用指定 `--icon` 指令指定圖示。
-
 若要建立保留主手機登入流程的版本，加上 `--primary-login`：
 
 ```sh
