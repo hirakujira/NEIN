@@ -1095,6 +1095,9 @@ PLIST = 'Payload/LINE.app/Info.plist'
 PROFILE_SCHEMA_VERSION = 2
 BUNDLE_IDENTIFIER = 'jp.naver.line'
 PROFILE_TYPE = 'line_patch'
+FRIEND_TAB_CASE_COMPARE = 0x7100173F
+FRIEND_TAB_CASE_RESULT = 0x1A9F17E8
+FRIEND_TAB_CASE_COLLAPSED = 0x52800008
 
 
 def profile_path_for(version, build, executable_sha256, profile_dir=PROFILE_DIR):
@@ -1249,6 +1252,129 @@ def _validate_login_section(profile, executable):
         raise ValueError('Combined profile login branch failed validation.')
 
 
+def analyze_friend_tab_executable(executable):
+    image = parse_arm64_macho(executable)
+    text = _bounded(
+        executable, image.text_offset, image.text_size, '__text',
+    )
+    result_instruction = struct.pack('<I', FRIEND_TAB_CASE_RESULT)
+    matches = []
+    cursor = text.find(result_instruction)
+    while cursor >= 0:
+        start = cursor - 4
+        if cursor % 4 == 0 and 0 <= start <= len(text) - 24:
+            instructions = struct.unpack_from('<6I', text, start)
+            call = instructions[2] & 0xFC000000
+            branch = instructions[3] & 0xFC000000
+            address = image.text_address + start
+            function_index = bisect.bisect_right(
+                image.function_starts, address,
+            ) - 1
+            function_end = (
+                image.function_starts[function_index + 1]
+                if function_index + 1 < len(image.function_starts)
+                else image.text_address + image.text_size
+            )
+            if (
+                instructions[0] == FRIEND_TAB_CASE_COMPARE and
+                instructions[1] == FRIEND_TAB_CASE_RESULT and
+                call == 0x94000000 and branch == 0x14000000 and
+                instructions[4] == FRIEND_TAB_CASE_COMPARE and
+                instructions[5] == FRIEND_TAB_CASE_RESULT and
+                address >= image.function_starts[function_index] and
+                address + 24 <= function_end
+            ):
+                first_offset = image.text_offset + start + 4
+                matches.append((first_offset, first_offset + 16))
+        cursor = text.find(result_instruction, cursor + 1)
+
+    if len(matches) != 1:
+        return None
+    offsets = matches[0]
+    replacement = struct.pack('<I', FRIEND_TAB_CASE_COLLAPSED).hex()
+    return {
+        'kind': 'friend_tab_default_collapsed',
+        'view_model': 'LineHomeTab.FriendTabViewModel',
+        'state_field': 'isSectionExpanded',
+        'friend_case': 5,
+        'manual_toggle_preserved': True,
+        'patches': [
+            {
+                'file_offset': hex(offset),
+                'original_hex': struct.pack('<I', FRIEND_TAB_CASE_RESULT).hex(),
+                'patched_hex': replacement,
+            }
+            for offset in offsets
+        ],
+    }
+
+
+def _validate_home_friends_section(profile, executable):
+    home_friends = profile.get('home_friends')
+    if home_friends is None:
+        return
+    if (
+        not isinstance(home_friends, dict) or
+        home_friends.get('kind') != 'friend_tab_default_collapsed' or
+        home_friends.get('view_model') != 'LineHomeTab.FriendTabViewModel' or
+        home_friends.get('state_field') != 'isSectionExpanded' or
+        home_friends.get('friend_case') != 5 or
+        home_friends.get('manual_toggle_preserved') is not True or
+        not isinstance(home_friends.get('patches'), list) or
+        len(home_friends['patches']) != 2
+    ):
+        raise ValueError('Malformed combined profile Friends section.')
+    try:
+        offsets = [
+            int(patch['file_offset'], 16)
+            for patch in home_friends['patches']
+        ]
+        originals = [
+            bytes.fromhex(patch['original_hex'])
+            for patch in home_friends['patches']
+        ]
+        replacements = [
+            bytes.fromhex(patch['patched_hex'])
+            for patch in home_friends['patches']
+        ]
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError('Malformed combined profile Friends patch sites.') from error
+
+    image = parse_arm64_macho(executable)
+    expected_original = struct.pack('<I', FRIEND_TAB_CASE_RESULT)
+    expected_replacement = struct.pack('<I', FRIEND_TAB_CASE_COLLAPSED)
+    if (
+        offsets != sorted(set(offsets)) or offsets[1] - offsets[0] != 16 or
+        any(
+            offset % 4 or
+            offset < image.text_offset or
+            offset + 4 > image.text_offset + image.text_size or
+            original != expected_original or
+            replacement != expected_replacement or
+            executable[offset:offset + 4] != original
+            for offset, original, replacement in zip(
+                offsets, originals, replacements,
+            )
+        )
+    ):
+        raise ValueError('Combined profile Friends instruction/layout mismatch.')
+
+    signature_offset = offsets[0] - 4
+    signature = struct.unpack_from('<6I', executable, signature_offset)
+    if (
+        signature[0] != FRIEND_TAB_CASE_COMPARE or
+        signature[1] != FRIEND_TAB_CASE_RESULT or
+        signature[2] & 0xFC000000 != 0x94000000 or
+        signature[3] & 0xFC000000 != 0x14000000 or
+        signature[4] != FRIEND_TAB_CASE_COMPARE or
+        signature[5] != FRIEND_TAB_CASE_RESULT or
+        analyze_friend_tab_executable(executable) != home_friends
+    ):
+        raise ValueError(
+            'Combined profile Friends signature is not a unique analyzed match.'
+        )
+
+
 def _validate_keychain_section(profile, executable):
     keychain = profile.get('keychain')
     if not isinstance(keychain, dict):
@@ -1297,6 +1423,7 @@ def validate_profile(profile, info, executable, allow_unverified=False):
     ):
         raise ValueError('Combined patch profile does not exactly match this IPA.')
     _validate_login_section(profile, executable)
+    _validate_home_friends_section(profile, executable)
     _validate_keychain_section(profile, executable)
 
 
@@ -1334,6 +1461,9 @@ def _analyze(info, executable, profile_dir):
         'login_patch': login_document['patch'],
         'keychain': keychain_result,
     }
+    home_friends = analyze_friend_tab_executable(executable)
+    if home_friends is not None:
+        profile['home_friends'] = home_friends
     validate_profile(profile, info, executable)
     return profile
 
@@ -1346,10 +1476,18 @@ def _write_profile(path, profile):
         existing_text = path.read_text(encoding='utf-8')
         existing = json.loads(existing_text)
         if existing.get('profile_type') == PROFILE_TYPE:
-            if _canonicalize_profile_reference(existing) != profile:
-                raise ValueError(
-                    f'Combined patch profile already exists with different contents: {path}'
-                )
+            canonical_existing = _canonicalize_profile_reference(existing)
+            if canonical_existing != profile:
+                upgraded = dict(canonical_existing)
+                if 'home_friends' in upgraded or 'home_friends' not in profile:
+                    raise ValueError(
+                        f'Combined patch profile already exists with different contents: {path}'
+                    )
+                upgraded['home_friends'] = profile['home_friends']
+                if upgraded != profile:
+                    raise ValueError(
+                        f'Combined patch profile already exists with different contents: {path}'
+                    )
             if existing_text != serialized:
                 _atomic_write(path, serialized)
             return path
@@ -1389,6 +1527,11 @@ def load_or_create_profile(
         if existing.get('profile_type') == PROFILE_TYPE:
             existing = _canonicalize_profile_reference(existing)
             validate_profile(existing, info, executable)
+            if 'home_friends' not in existing:
+                home_friends = analyze_friend_tab_executable(executable)
+                if home_friends is not None:
+                    existing['home_friends'] = home_friends
+                    validate_profile(existing, info, executable)
             _write_profile(path, existing)
             return existing, False
     if allow_unverified:

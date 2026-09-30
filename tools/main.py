@@ -42,16 +42,6 @@ DEFAULT_ICON = 'design_simple_banana'
 AD_DOMAIN_LIST = ROOT / 'ad_domains.txt'
 PATCH_PROFILE_DIR = ROOT / 'patch_profiles'
 
-# LINE 26.14.0 (2026.828.1845), executable UUID
-# 0BAB483C-CA85-38CE-8984-0C20C92511E4. FriendTabViewModel initializes its
-# isSectionExpanded dictionary with only the friend case set to true. Set that
-# initial value to false in both dictionary insertion paths; later user-driven
-# updates remain unchanged.
-FRIEND_TAB_DEFAULT_EXPANDED_OFFSETS = (0x3392A18, 0x3392A28)
-FRIEND_TAB_DEFAULT_EXPANDED_ORIGINAL = bytes.fromhex('e8179f1a')  # cset w8, eq
-FRIEND_TAB_COLLAPSED = bytes.fromhex('08008052')  # mov w8, #0
-
-
 @dataclass(frozen=True)
 class PatchProfile:
     version: str
@@ -62,6 +52,7 @@ class PatchProfile:
     original: bytes
     instruction: str
     keychain_profile: dict | None = None
+    home_friends: dict | None = None
 
 
 def digest(data):
@@ -290,6 +281,7 @@ def find_profile(info, original, allow_unverified=False, profile_dir=None):
         original=bytes.fromhex(patch['original_hex']),
         instruction=patch['instruction'],
         keychain_profile=document['keychain'],
+        home_friends=document.get('home_friends'),
     )
     verify_profile_for_binary(profile, original)
     return profile
@@ -315,6 +307,7 @@ def select_profile(
         original=bytes.fromhex(patch['original_hex']),
         instruction=patch['instruction'],
         keychain_profile=profile['keychain'],
+        home_friends=profile.get('home_friends'),
     )
     analysis = {
         'mode': 'analyzed_and_saved' if created else 'saved_profile',
@@ -340,18 +333,24 @@ def patched_binary(original, profile, verify_hash=True):
     return bytes(result)
 
 
-def patch_friend_tab_default_collapsed(binary, verify_hash=True):
-    if verify_hash and digest(binary) != (
-            '5da134826db5a5b51a20a297fb1b205c2f6f2adcf87e227b6d60f3070cebdd39'):
-        raise ValueError('Executable SHA-256 mismatch: expected the known-good NEIN executable.')
-    if len(binary) < max(FRIEND_TAB_DEFAULT_EXPANDED_OFFSETS) + 4 or \
-            struct.unpack_from('<I', binary)[0] != 0xFEEDFACF:
-        raise ValueError('Expected the verified thin ARM64 NEIN executable.')
+def patch_friend_tab_default_collapsed(binary, profile):
+    if not isinstance(profile, dict) or not isinstance(profile.get('patches'), list):
+        raise ValueError('No analyzed Friends patch is available for this IPA.')
     result = bytearray(binary)
-    for offset in FRIEND_TAB_DEFAULT_EXPANDED_OFFSETS:
-        if binary[offset:offset + 4] != FRIEND_TAB_DEFAULT_EXPANDED_ORIGINAL:
+    for patch in profile['patches']:
+        try:
+            offset = int(patch['file_offset'], 16)
+            original = bytes.fromhex(patch['original_hex'])
+            replacement = bytes.fromhex(patch['patched_hex'])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError('Malformed analyzed Friends patch site.') from error
+        if (
+            len(original) != 4 or len(replacement) != 4 or
+            offset < 0 or offset + 4 > len(binary) or
+            binary[offset:offset + 4] != original
+        ):
             raise ValueError('Expected FriendTabViewModel initial expansion instruction not found.')
-        result[offset:offset + 4] = FRIEND_TAB_COLLAPSED
+        result[offset:offset + 4] = replacement
     return bytes(result)
 
 
@@ -448,6 +447,8 @@ def main():
         profile, automatic_analysis = select_profile(
             info, original, args.auto_login_patch, args.allow_unverified,
         )
+        if args.collapse_friends_on_launch and profile.home_friends is None:
+            raise ValueError('No analyzed Friends patch is available for this IPA.')
     output_info = patched_info_plist(info, enable_icon_picker=not args.entry_only)
     icon_preview_files = (
         {} if args.entry_only else
@@ -472,7 +473,9 @@ def main():
         )
         modified, injection = (entry_patched, None) if args.entry_only else add_dylib(entry_patched)
         if args.collapse_friends_on_launch:
-            modified = patch_friend_tab_default_collapsed(modified, verify_hash=False)
+            modified = patch_friend_tab_default_collapsed(
+                modified, profile.home_friends,
+            )
         with zipfile.ZipFile(args.output, 'x') as target:
             target.comment = source.comment
             for entry in source.infolist():
@@ -528,13 +531,21 @@ def main():
         raise AssertionError('Login entry instruction differs from the selected mode.')
     start = int(injection['load_command_offset'], 16) if injection else 0
     end = start + injection['load_command_size'] if injection else 0
+    friend_patch_ranges = (
+        [
+            (
+                int(patch['file_offset'], 16),
+                int(patch['file_offset'], 16) + len(bytes.fromhex(patch['original_hex'])),
+            )
+            for patch in profile.home_friends['patches']
+        ]
+        if args.collapse_friends_on_launch else []
+    )
     if len(modified) != len(original) or any(
             a != b and not (
                 (injection is not None and (16 <= i < 24 or start <= i < end)) or
                 profile.patch_offset <= i < profile.patch_offset + 4 or
-                (args.collapse_friends_on_launch and
-                 any(offset <= i < offset + 4
-                     for offset in FRIEND_TAB_DEFAULT_EXPANDED_OFFSETS))
+                any(start <= i < end for start, end in friend_patch_ranges)
             )
             for i, (a, b) in enumerate(zip(original, modified))):
         raise AssertionError('Changed bytes outside documented patch regions')
@@ -590,7 +601,9 @@ def main():
             'view_model': 'LineHomeTab.FriendTabViewModel',
             'state_field': 'isSectionExpanded',
             'friend_case': 5,
-            'patch_offsets': [hex(offset) for offset in FRIEND_TAB_DEFAULT_EXPANDED_OFFSETS],
+            'patch_offsets': [
+                patch['file_offset'] for patch in profile.home_friends['patches']
+            ],
             'manual_toggle_preserved': True,
         }
     if args.remove_ads or args.hide_promotional_tabs:

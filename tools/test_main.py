@@ -283,17 +283,25 @@ class MainToolTests(unittest.TestCase):
                     str(source), str(output), '--auto-login-patch',
                 ])
 
-    def test_friend_tab_initial_state_collapses_friend_case(self):
-        last = max(main.FRIEND_TAB_DEFAULT_EXPANDED_OFFSETS)
-        binary = bytearray(last + 4)
+    def test_friend_tab_initial_state_uses_analyzed_patch_sites(self):
+        offsets = (0x100, 0x110)
+        binary = bytearray(offsets[-1] + 4)
         struct.pack_into('<I', binary, 0, 0xFEEDFACF)
-        for offset in main.FRIEND_TAB_DEFAULT_EXPANDED_OFFSETS:
-            binary[offset:offset + 4] = main.FRIEND_TAB_DEFAULT_EXPANDED_ORIGINAL
+        profile = {'patches': []}
+        for offset in offsets:
+            original = bytes.fromhex('e8179f1a')
+            replacement = bytes.fromhex('08008052')
+            binary[offset:offset + 4] = original
+            profile['patches'].append({
+                'file_offset': hex(offset),
+                'original_hex': original.hex(),
+                'patched_hex': replacement.hex(),
+            })
 
-        patched = main.patch_friend_tab_default_collapsed(bytes(binary), verify_hash=False)
+        patched = main.patch_friend_tab_default_collapsed(bytes(binary), profile)
 
-        for offset in main.FRIEND_TAB_DEFAULT_EXPANDED_OFFSETS:
-            self.assertEqual(patched[offset:offset + 4], main.FRIEND_TAB_COLLAPSED)
+        for offset in offsets:
+            self.assertEqual(patched[offset:offset + 4], bytes.fromhex('08008052'))
 
     def test_embedded_extensions_and_watch_app_are_excluded(self):
         names = [
