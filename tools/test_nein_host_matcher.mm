@@ -23,6 +23,11 @@ int main() {
     assert(!NEINIsBlockedHost("notdoubleclick.net"));
     assert(!NEINIsBlockedHost("doubleclick.net.example"));
     assert(!NEINIsBlockedHost("example.com"));
+    // Blocking the ad subdomain must not block the CDN's parent or siblings.
+    assert(!NEINIsBlockedHost("line-scdn.net"));
+    assert(!NEINIsBlockedHost("profile.line-scdn.net"));
+    assert(!NEINIsBlockedHost("stickers.line-scdn.net"));
+    assert(!NEINIsBlockedHost("obs.line-apps.com"));
 
     // Exercise the actual WebKit replacement decision, without opening a
     // network connection or requiring an interactive LINE session.
@@ -37,6 +42,12 @@ int main() {
             @"https://example.com/normal"]]);
     assert([capturedURL.absoluteString isEqualToString:
         @"https://example.com/normal"]);
+
+    NEINBlockedLoadRequest(nil, @selector(loadRequest:),
+        [NSURLRequest requestWithURL:[NSURL URLWithString:
+            @"https://profile.line-scdn.net/image"]]);
+    assert([capturedURL.absoluteString isEqualToString:
+        @"https://profile.line-scdn.net/image"]);
 
     return 0;
 }
