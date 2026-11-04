@@ -1,6 +1,8 @@
 #import <Foundation/Foundation.h>
 #include <errno.h>
 #include <spawn.h>
+#include <fcntl.h>
+#include <sys/file.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -22,11 +24,23 @@ int main(void) {
 
         NSString *runtimeRoot = [NSHomeDirectory()
             stringByAppendingPathComponent:@"Library/Application Support/NEIN/Runtime"];
+#ifdef NEIN_TEST_RUNTIME_ROOT
+        const char *testRoot = getenv("NEIN_TEST_RUNTIME_ROOT");
+        if (testRoot) runtimeRoot = [NSString stringWithUTF8String:testRoot];
+#endif
         NSError *error = nil;
         if (![[NSFileManager defaultManager] createDirectoryAtPath:runtimeRoot
             withIntermediateDirectories:YES attributes:nil error:&error]) {
             NSLog(@"[NEINLauncher] cannot create runtime directory: %@", error);
             return EIO;
+        }
+        NSString *lockPath = [runtimeRoot stringByAppendingPathComponent:@"launcher.lock"];
+        int lockFD = open(lockPath.fileSystemRepresentation, O_CREAT | O_RDWR, 0600);
+        if (lockFD < 0) return errno;
+        if (flock(lockFD, LOCK_EX | LOCK_NB) != 0) {
+            NSLog(@"[NEINLauncher] another instance is already running");
+            close(lockFD);
+            return 0;
         }
 
         NSString *innerInfoPath = [templatePath
@@ -40,15 +54,33 @@ int main(void) {
         NSString *runtimeApp = [runtimeRoot stringByAppendingPathComponent:runtimeName];
         NSString *runtimeExecutable = [runtimeApp
             stringByAppendingPathComponent:@"Contents/MacOS/LINE"];
-        if (![[NSFileManager defaultManager] isExecutableFileAtPath:runtimeExecutable]) {
-            if ([[NSFileManager defaultManager] fileExistsAtPath:runtimeApp] &&
-                ![[NSFileManager defaultManager] removeItemAtPath:runtimeApp error:&error]) {
-                NSLog(@"[NEINLauncher] cannot replace runtime copy: %@", error);
+        NSFileManager *files = NSFileManager.defaultManager;
+        NSString *seal = @"Contents/_CodeSignature/CodeResources";
+        NSData *templateSeal = [NSData dataWithContentsOfFile:[templatePath stringByAppendingPathComponent:seal]];
+        NSData *runtimeSeal = [NSData dataWithContentsOfFile:[runtimeApp stringByAppendingPathComponent:seal]];
+        if (!templateSeal) {
+            NSLog(@"[NEINLauncher] inner app signature seal is missing");
+            return EIO;
+        }
+        if (![files isExecutableFileAtPath:runtimeExecutable] ||
+            ![templateSeal isEqualToData:runtimeSeal] ||
+            ![files contentsEqualAtPath:templateExecutable andPath:runtimeExecutable]) {
+            NSString *staging = [runtimeRoot stringByAppendingPathComponent:
+                [NSString stringWithFormat:@".LINE-stage-%@.app", NSUUID.UUID.UUIDString]];
+            if (![files copyItemAtPath:templatePath toPath:staging error:&error]) {
+                NSLog(@"[NEINLauncher] cannot prepare runtime copy: %@", error);
                 return EIO;
             }
-            if (![[NSFileManager defaultManager] copyItemAtPath:templatePath
-                toPath:runtimeApp error:&error]) {
-                NSLog(@"[NEINLauncher] cannot prepare runtime copy: %@", error);
+            if ([files fileExistsAtPath:runtimeApp]) {
+                if (renamex_np(staging.fileSystemRepresentation, runtimeApp.fileSystemRepresentation, RENAME_SWAP) != 0) {
+                    NSLog(@"[NEINLauncher] cannot swap runtime copy: %s", strerror(errno));
+                    [files removeItemAtPath:staging error:nil];
+                    return EIO;
+                }
+                [files removeItemAtPath:staging error:nil];
+            } else if (![files moveItemAtPath:staging toPath:runtimeApp error:&error]) {
+                NSLog(@"[NEINLauncher] cannot install runtime copy: %@", error);
+                [files removeItemAtPath:staging error:nil];
                 return EIO;
             }
         }
