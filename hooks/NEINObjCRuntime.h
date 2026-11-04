@@ -3,7 +3,7 @@
 #import <objc/runtime.h>
 #include <string.h>
 
-static inline BOOL LMMethodHasType(Method method, const char *returnType,
+static inline BOOL NEINMethodHasType(Method method, const char *returnType,
                                    unsigned argumentCount, const char *argument2,
                                    const char *argument3) {
     if (!method || method_getNumberOfArguments(method) != argumentCount) return NO;
@@ -21,12 +21,12 @@ static inline BOOL LMMethodHasType(Method method, const char *returnType,
     return YES;
 }
 
-static inline BOOL LMHookClassMethod(Class cls, SEL selector, const char *returnType,
+static inline BOOL NEINHookClassMethod(Class cls, SEL selector, const char *returnType,
                                      unsigned argumentCount, const char *argument2,
                                      const char *argument3, IMP replacement, IMP *original) {
     Class meta = object_getClass(cls);
     Method method = meta ? class_getInstanceMethod(meta, selector) : NULL;
-    if (!LMMethodHasType(method, returnType, argumentCount, argument2, argument3)) {
+    if (!NEINMethodHasType(method, returnType, argumentCount, argument2, argument3)) {
         return NO;
     }
     if (original) *original = method_getImplementation(method);

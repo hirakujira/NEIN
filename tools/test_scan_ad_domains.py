@@ -29,4 +29,4 @@ class ScanAdDomainsTests(unittest.TestCase):
         )
         header = scan_ad_domains.render_header(domains)
         self.assertIn('@"taboola.com"', header)
-        self.assertIn('LMAdBlockedDomainCount', header)
+        self.assertIn('NEINAdBlockedDomainCount', header)
