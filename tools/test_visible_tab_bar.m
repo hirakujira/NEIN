@@ -112,6 +112,8 @@ static void NEINOpenLineSettings(UITabBarController *controller) {
     (void)controller; settingsOpened++;
 }
 
+static id NEINPresentationTabAppearance(id appearance) { return [appearance copy]; }
+
 #include "../hooks/NEINVisibleTabBar.h"
 
 @interface TestDelegate : NSObject <UITabBarControllerDelegate>
@@ -343,6 +345,19 @@ int main(void) {
                     didSelectItem:nativePresentation.bar.items[3]];
         assert(nativeSettingsController.selectedViewController == nativeControllers[4]);
         assert(settingsOpened == routesBeforeNativeSettings);
+        // LINE's own settings tab can lack artwork; the gear fills the slot.
+        UITabBarItem *nativeSettings = nativeItems[4];
+        id nativeArtwork = nativeSettings.image;
+        nativeSettings.image = nil;
+        NEINUpdateVisibleTabBar(nativeSettingsController);
+        assert(nativePresentation.bar.items.count == 4);
+        assert(nativePresentation.settingsItem.image && nativePresentation.settingsItem.selectedImage);
+        assert(nativePresentation.bar.items[3].image == nativePresentation.settingsItem.image);
+        assert(nativePresentation.bar.items[3].selectedImage == nativePresentation.settingsItem.selectedImage);
+        nativeSettings.image = nativeArtwork;
+        NEINUpdateVisibleTabBar(nativeSettingsController);
+        assert(nativePresentation.bar.items[3].image == nativeArtwork);
+        assert(nativePresentation.bar.items[3].selectedImage == nil);
         ((UITabBarItem *)nativeItems[4]).title = @"MISC";
         NEINUpdateVisibleTabBar(nativeSettingsController);
         assert(nativePresentation.bar.items.count == 5);

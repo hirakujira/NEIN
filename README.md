@@ -81,7 +81,6 @@ python3 tools/main.py --keychain-compat --remove-ads --hide-promotional-tabs \
 - 不支援推播通知功能
 - 不包含原版的分享、Widget、Siri 與 Apple Watch 擴充功能。
 - `--remove-ads` 可能使 LINE News、推薦內容或嵌入式廣告影片無法載入。
-- 已知問題：點「設定」分頁開啟設定後，該分頁的齒輪圖示可能消失，只剩「設定」文字；仍可正常點擊，重新開啟 App 後恢復。
 - 只支援已核對的版本和 IPA，其他版本會拒絕處理。
 - 請先備份 LINE 資料，再於測試裝置安裝。
 

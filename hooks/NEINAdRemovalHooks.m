@@ -164,6 +164,20 @@ static void NEINOpenLineSettings(UITabBarController *controller) {
     [controller presentViewController:alert animated:YES completion:nil];
 }
 
+// LINE's tab icons are pre-colored bitmaps, so its appearance leaves template
+// icons such as the gear on the default blue tint. Match the selected title.
+static UITabBarAppearance *NEINPresentationTabAppearance(UITabBarAppearance *source) {
+    UITabBarAppearance *appearance = [source copy];
+    if (!appearance) return nil;
+    for (UITabBarItemAppearance *layout in @[appearance.stackedLayoutAppearance,
+                                             appearance.inlineLayoutAppearance,
+                                             appearance.compactInlineLayoutAppearance]) {
+        UIColor *color = layout.selected.titleTextAttributes[NSForegroundColorAttributeName];
+        layout.selected.iconColor = [color isKindOfClass:UIColor.class] ? color : UIColor.labelColor;
+    }
+    return appearance;
+}
+
 #include "NEINVisibleTabBar.h"
 #ifdef NEIN_MULTI_TAB_DIAGNOSTICS
 #include "NEINTabDiagnostics.h"

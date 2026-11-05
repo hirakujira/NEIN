@@ -65,6 +65,13 @@ static char NEINVisibleTabSourceOwnerKey;
     return item;
 }
 
+// LINE adds its own settings tab once settings has been opened, but leaves
+// that item without artwork. Show the gear there instead of a blank slot.
+- (UIImage *)imageForSourceItem:(UITabBarItem *)item selected:(BOOL)selected {
+    if (item.image || !NEINIsSettingsTabItem(item)) return selected ? item.selectedImage : item.image;
+    return selected ? self.settingsItem.selectedImage : self.settingsItem.image;
+}
+
 - (BOOL)matchesCurrentModel {
     UITabBarController *controller = self.controller;
     if (!controller || controller.viewControllers.count != self.sourceControllers.count ||
@@ -152,7 +159,8 @@ static char NEINVisibleTabSourceOwnerKey;
             for (NSNumber *index in indices) {
                 UITabBarItem *item = items[index.unsignedIntegerValue];
                 [copies addObject:[[UITabBarItem alloc] initWithTitle:item.title
-                    image:item.image selectedImage:item.selectedImage]];
+                    image:[self imageForSourceItem:item selected:NO]
+                    selectedImage:[self imageForSourceItem:item selected:YES]]];
             }
             if (!hasNativeSettings) [copies addObject:self.settingsItem];
             [self.bar setItems:copies animated:NO];
@@ -161,8 +169,10 @@ static char NEINVisibleTabSourceOwnerKey;
             UITabBarItem *item = items[indices[i].unsignedIntegerValue];
             UITabBarItem *copy = self.bar.items[i];
             if (copy.title != item.title && ![copy.title isEqualToString:item.title]) copy.title = item.title;
-            if (copy.image != item.image) copy.image = item.image;
-            if (copy.selectedImage != item.selectedImage) copy.selectedImage = item.selectedImage;
+            UIImage *image = [self imageForSourceItem:item selected:NO];
+            UIImage *selectedImage = [self imageForSourceItem:item selected:YES];
+            if (copy.image != image) copy.image = image;
+            if (copy.selectedImage != selectedImage) copy.selectedImage = selectedImage;
             if (copy.badgeValue != item.badgeValue && ![copy.badgeValue isEqualToString:item.badgeValue]) copy.badgeValue = item.badgeValue;
             if (copy.badgeColor != item.badgeColor) copy.badgeColor = item.badgeColor;
             if (copy.enabled != item.enabled) copy.enabled = item.enabled;
@@ -171,8 +181,8 @@ static char NEINVisibleTabSourceOwnerKey;
             self.originalAlpha = source.alpha;
             self.originalInteraction = source.userInteractionEnabled;
             self.originalAccessibilityHidden = source.accessibilityElementsHidden;
-            self.bar.standardAppearance = [source.standardAppearance copy];
-            self.bar.scrollEdgeAppearance = [source.scrollEdgeAppearance copy];
+            self.bar.standardAppearance = NEINPresentationTabAppearance(source.standardAppearance);
+            self.bar.scrollEdgeAppearance = NEINPresentationTabAppearance(source.scrollEdgeAppearance);
             self.active = YES;
             NEINVisibleTabSourceOwner *owner = [NEINVisibleTabSourceOwner new];
             owner.presentation = self;
