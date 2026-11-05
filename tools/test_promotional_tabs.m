@@ -270,6 +270,20 @@ int main(void) {
         nativeItems[0].title = @"SHOPPING";
         assert(NEINVisibleTabDestination(nativeItems, 1, 2) == NSNotFound);
         assert([nativeItems isEqualToArray:nativeSnapshot]); // Same model objects/order.
+        NSMutableArray<UITabBarItem *> *discoverItems = [NSMutableArray new];
+        for (NSString *title in @[@"主頁", @"聊天", @"逛逛", @"VOOM", @"通話"]) {
+            UITabBarItem *item = [UITabBarItem new];
+            item.title = title;
+            [discoverItems addObject:item];
+        }
+        assert(NEINIsMainLineTabBar(discoverItems));
+        assert(([NEINVisibleTabIndices(discoverItems) isEqualToArray:@[@0, @1, @4]]));
+        assert(NEINVisibleTabDestination(discoverItems, 1, 2) == 4);
+        assert(NEINVisibleTabDestination(discoverItems, 4, 3) == 1);
+        discoverItems[2].title = @" Discover ";
+        assert(NEINVisibleTabIsPromotional(discoverItems[2]));
+        discoverItems[2].title = @"我的逛逛";
+        assert(!NEINVisibleTabIsPromotional(discoverItems[2]));
         UITabBarItem *partial = [UITabBarItem new];
         partial.title = @"VOOM settings";
         assert(!NEINVisibleTabIsPromotional(partial));

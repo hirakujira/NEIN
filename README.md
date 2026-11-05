@@ -16,6 +16,7 @@ NEIN 在德文中就是「不／不要（No）」的意思。
 |---|---|---|
 | 26.14.0 | 自己簽署 | 需要 iOS 18 以上，沒有推播通知（以下有解法） |
 | 26.15.1 | 自己簽署 | 同上 |
+| 26.17.0 | 自己簽署 | 同上 |
 
 
 ## macOS 版本 的 NEIN
@@ -34,12 +35,16 @@ NEIN 在德文中就是「不／不要（No）」的意思。
 
 ```sh
 python3 tools/main.py --keychain-compat --remove-ads --hide-promotional-tabs --collapse-friends-on-launch \
-  jp.naver.line_26.15.1.ipa \
-  output/NEIN-26.15.1-secondary.ipa
+  jp.naver.line_26.17.0.ipa \
+  output/NEIN-26.17.0-secondary.ipa
 ```
 
 `--collapse-friends-on-launch` 讓首頁的好友區塊在建立時預設收合；進入 App
 後仍可用原本的區塊控制手動展開。
+
+`--hide-promotional-tabs` 會隱藏 VOOM、新聞、購物與「逛逛」（Discover）分頁按鈕。
+NEIN 無法從原本的入口正常開啟設定，所以分頁列最後會另外加上「設定」分頁；
+也可以在 5 秒內連點「主頁」10 次開啟設定。
 
 `--remove-ads` 會停用已分析的廣告 loader、隱藏廣告檢視，並封鎖已核對的 LINE
 廣告、Google Ads/IMA 與 Taboola 網域。封鎖清單保存在
@@ -54,8 +59,8 @@ python3 tools/scan_ad_domains.py jp.naver.line_26.15.1.ipa ad_domains.txt
 ```sh
 python3 tools/main.py --keychain-compat --remove-ads --hide-promotional-tabs \
   --primary-login \
-  jp.naver.line_26.15.1.ipa \
-  output/NEIN-26.15.1-primary.ipa
+  jp.naver.line_26.17.0.ipa \
+  output/NEIN-26.17.0-primary.ipa
 ```
 
 ## 建議做法 📱
@@ -76,6 +81,7 @@ python3 tools/main.py --keychain-compat --remove-ads --hide-promotional-tabs \
 - 不支援推播通知功能
 - 不包含原版的分享、Widget、Siri 與 Apple Watch 擴充功能。
 - `--remove-ads` 可能使 LINE News、推薦內容或嵌入式廣告影片無法載入。
+- 已知問題：點「設定」分頁開啟設定後，該分頁的齒輪圖示可能消失，只剩「設定」文字；仍可正常點擊，重新開啟 App 後恢復。
 - 只支援已核對的版本和 IPA，其他版本會拒絕處理。
 - 請先備份 LINE 資料，再於測試裝置安裝。
 

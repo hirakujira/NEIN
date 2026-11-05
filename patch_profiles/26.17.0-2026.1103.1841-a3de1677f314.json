@@ -1,0 +1,129 @@
+{
+  "architecture": "arm64",
+  "build": "2026.1103.1841",
+  "bundle_identifier": "jp.naver.line",
+  "executable_sha256": "a3de1677f3140ed076554f642933209db2d41b838d2a28b98ab4a2bdcacf1bd8",
+  "home_friends": {
+    "friend_case": 5,
+    "kind": "friend_tab_default_collapsed",
+    "manual_toggle_preserved": true,
+    "patches": [
+      {
+        "file_offset": "0x36dfac0",
+        "original_hex": "e8179f1a",
+        "patched_hex": "08008052"
+      },
+      {
+        "file_offset": "0x36dfad0",
+        "original_hex": "e8179f1a",
+        "patched_hex": "08008052"
+      }
+    ],
+    "state_field": "isSectionExpanded",
+    "view_model": "LineHomeTab.FriendTabViewModel"
+  },
+  "keychain": {
+    "architecture": "arm64",
+    "authentication_sites": [
+      {
+        "class": "NLAuthenticationManager",
+        "operation": "add",
+        "return_offset": "0x3b2c8e0",
+        "selector": "saveToKeychainData:forQuery:"
+      },
+      {
+        "class": "NLAuthenticationManager",
+        "operation": "add",
+        "return_offset": "0x3b2c914",
+        "selector": "saveToKeychainData:forQuery:"
+      },
+      {
+        "class": "NLAuthenticationManager",
+        "operation": "update",
+        "return_offset": "0x3b2c98c",
+        "selector": "saveToKeychainData:forQuery:"
+      },
+      {
+        "class": "NLAuthenticationManager",
+        "operation": "copy",
+        "return_offset": "0x3b2ca74",
+        "selector": "dataFromKeychainForQuery:errorCode:"
+      },
+      {
+        "class": "NLAuthenticationManager",
+        "operation": "delete",
+        "return_offset": "0x3b2cb2c",
+        "selector": "deleteFromKeychainWithQuery:"
+      },
+      {
+        "class": "NLAuthenticationManager",
+        "operation": "delete",
+        "return_offset": "0x3b2cb44",
+        "selector": "deleteFromKeychainWithQuery:"
+      }
+    ],
+    "build": "2026.1103.1841",
+    "bundle_identifier": "jp.naver.line",
+    "e2ee_reference_signatures": null,
+    "e2ee_sites": [
+      {
+        "operation": "copy",
+        "return_offset": "0x40d5274"
+      },
+      {
+        "operation": "delete",
+        "return_offset": "0x40d5888"
+      },
+      {
+        "operation": "update",
+        "return_offset": "0x40d55f8"
+      },
+      {
+        "operation": "add",
+        "return_offset": "0x40d5668"
+      }
+    ],
+    "executable_sha256": "a3de1677f3140ed076554f642933209db2d41b838d2a28b98ab4a2bdcacf1bd8",
+    "got": {
+      "address": "0x10c0a8a10",
+      "file_offset": "0xc0a8a10",
+      "offset": "0xc0a8a10",
+      "section_address": "0x10c074000",
+      "section_size": "0x420d8"
+    },
+    "imports": {
+      "add": {
+        "got_address": "0x10c0a8a10",
+        "stub_address": "0x1095c79ec"
+      },
+      "copy": {
+        "got_address": "0x10c0a8a18",
+        "stub_address": "0x1095c79f8"
+      },
+      "delete": {
+        "got_address": "0x10c0a8a20",
+        "stub_address": "0x1095c7a04"
+      },
+      "update": {
+        "got_address": "0x10c0a8a28",
+        "stub_address": "0x1095c7a10"
+      }
+    },
+    "macho_uuid": "614ced5907e5372d94b2d4901870c7a0",
+    "profile_type": "line_keychain",
+    "schema_version": 1,
+    "version": "26.17.0"
+  },
+  "login_patch": {
+    "file_offset": "0x5e4f4",
+    "instruction": "tbz w0, #0, 0x10005e58c",
+    "kind": "secondary_login_entry_branch",
+    "original_hex": "c0040036",
+    "patched_hex": "1f2003d5",
+    "target_address": "0x10005e58c",
+    "virtual_address": "0x10005e4f4"
+  },
+  "profile_type": "line_patch",
+  "schema_version": 2,
+  "version": "26.17.0"
+}

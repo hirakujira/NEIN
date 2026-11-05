@@ -351,6 +351,35 @@ int main(void) {
         NEINUpdateVisibleTabBar(nativeSettingsController);
         assert(nativePresentation.bar.items.count == 4);
         assert(nativePresentation.bar.items.lastObject != nativePresentation.settingsItem);
+
+        UITabBarController *discoverController = [UITabBarController new];
+        discoverController.tabBar = [[UITabBar alloc] initWithFrame:CGRectMake(0, 790, 402, 83)];
+        [root addSubview:discoverController.tabBar];
+        NSMutableArray *discoverItems = [NSMutableArray new];
+        NSMutableArray *discoverControllers = [NSMutableArray new];
+        for (NSString *title in @[@"主頁", @"聊天", @"逛逛", @"VOOM", @"通話"]) {
+            UITabBarItem *item = [[UITabBarItem alloc] initWithTitle:title
+                image:[NSObject new] selectedImage:nil];
+            UIViewController *viewController = [UIViewController new];
+            viewController.tabBarItem = item;
+            [discoverItems addObject:item];
+            [discoverControllers addObject:viewController];
+        }
+        discoverController.tabBar.items = discoverItems;
+        discoverController.viewControllers = discoverControllers;
+        discoverController.selectedViewController = discoverControllers[2];
+        NEINUpdateVisibleTabBar(discoverController);
+        NEINVisibleTabBar *discoverPresentation =
+            objc_getAssociatedObject(discoverController, &NEINVisibleTabBarKey);
+        assert(discoverPresentation.active && discoverPresentation.bar.items.count == 4);
+        assert(([discoverPresentation.indices isEqualToArray:@[@0, @1, @4]]));
+        for (UITabBarItem *item in discoverPresentation.bar.items) {
+            assert(![item.title isEqualToString:@"逛逛"]);
+        }
+        // A launch-time selection of the hidden tab moves to a visible tab.
+        assert(discoverController.selectedViewController == discoverControllers[4]);
+        assert(NEINGuardVisibleTabSelection(discoverController, 2) == 1);
+        assert(discoverController.tabBar.items.count == 5);
         puts("Native tab presentation lifecycle and selection tests passed (view doubles).");
     }
     return 0;

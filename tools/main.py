@@ -410,7 +410,7 @@ def parse_args(argv=None):
     parser.add_argument('--remove-ads', action='store_true',
                         help='Block audited ad domains and disable known ad views (verified on 26.14.0; experimental on 26.15.1)')
     parser.add_argument('--hide-promotional-tabs', action='store_true',
-                        help='Hide VOOM, News and Shopping tab buttons (verified on 26.14.0; experimental on 26.15.1)')
+                        help='Hide VOOM, News, Shopping and Discover tab buttons (verified on 26.14.0; experimental on 26.15.1 and 26.17.0)')
     parser.add_argument('--tab-diagnostics', action='store_true',
                         help='Add a tab-only JSON export button; requires --hide-promotional-tabs')
     parser.add_argument('--collapse-friends-on-launch', action='store_true',
@@ -617,7 +617,7 @@ def main():
                 'GADAdLoader and GADBannerView request entry points',
                 'Google IMA request/start entry points',
                 'known LINE ad view class families',
-                'VOOM, News and Shopping tab controllers',
+                'VOOM, News, Shopping and Discover tab controllers',
             ],
             'verification': (
                 'Static hook ABI checks and archive integrity passed; '
