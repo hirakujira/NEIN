@@ -117,7 +117,7 @@ def main(argv=None):
         ),
         'limitations': [
             'The inner LINE process keeps jp.naver.line.mac for data compatibility.',
-            'The launcher copies the signed inner app to a temporary runtime directory before starting it.',
+            'The launcher maintains a versioned runtime copy and refreshes it when the signed inner app changes.',
             'The original /Applications/LINE.app is not modified.',
             'Real account sync and message history still require user-side testing.',
         ],
