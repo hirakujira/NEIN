@@ -136,6 +136,20 @@ class MainToolTests(unittest.TestCase):
             'tbz w0, #0, 0x100001038',
         )
         payload = b'nein' * (1024 * 1024)
+        stale_metadata = [
+            'Payload/LINE.app/_CodeSignature/',
+            'Payload/LINE.app/_CodeSignature/CodeResources',
+            'META-INF/',
+            'META-INF/com.apple.ZipMetadata.plist',
+            'META-INF/com.apple.FixedZipMetadata.bin',
+            'iTunesMetadata.plist',
+            'Payload/LINE.app/SC_Info/',
+            'Payload/LINE.app/SC_Info/Manifest.plist',
+            'Payload/LINE.app/SC_Info/LINE.sinf',
+            'Payload/LINE.app/Frameworks/Test.framework/SC_Info/',
+            'Payload/LINE.app/Frameworks/Test.framework/SC_Info/Test.sinf',
+        ]
+        framework_signature = 'Payload/LINE.app/Frameworks/Test.framework/_CodeSignature/CodeResources'
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / 'input.ipa'
             output = Path(directory) / 'output.ipa'
@@ -147,6 +161,15 @@ class MainToolTests(unittest.TestCase):
                 member.compress_type = zipfile.ZIP_DEFLATED
                 archive.writestr(member, payload)
                 archive.writestr('Payload/LINE.app/PlugIns/removed.appex/file', b'removed')
+                for name in stale_metadata:
+                    content = (
+                        plistlib.dumps({'SinfReplicationPaths': [
+                            'PlugIns/LineNotificationServiceExtension.appex/SC_Info/extension.sinf',
+                        ]}) if name.endswith('SC_Info/Manifest.plist') else
+                        b'' if name.endswith('/') else b'stale metadata'
+                    )
+                    archive.writestr(name, content)
+                archive.writestr(framework_signature, b'unchanged framework signature')
             args = main.parse_args([str(source), str(output), '--entry-only'])
             with mock.patch.object(main, 'parse_args', return_value=args), \
                     mock.patch.object(main, 'select_profile', return_value=(profile, None)), \
@@ -160,12 +183,121 @@ class MainToolTests(unittest.TestCase):
                                  zipfile.ZIP_DEFLATED)
                 self.assertNotIn('Payload/LINE.app/PlugIns/removed.appex/file',
                                  archive.namelist())
+                for name in stale_metadata:
+                    self.assertNotIn(name, archive.namelist())
+                self.assertEqual(archive.read(framework_signature), b'unchanged framework signature')
                 self.assertEqual(archive.read(main.EXECUTABLE),
                                  main.patched_binary(original, profile))
             manifest = json.loads(output.with_suffix('.manifest.json').read_text())
             self.assertEqual(manifest['source_ipa_sha256'], hashlib.sha256(source.read_bytes()).hexdigest())
             self.assertEqual(manifest['output_ipa_sha256'], hashlib.sha256(output.read_bytes()).hexdigest())
             self.assertEqual(manifest['changed_byte_offsets'], ['0xf8', '0xf9', '0xfa', '0xfb'])
+            self.assertFalse(manifest['enable_sticker_shop'])
+            self.assertNotIn('sticker_shop', manifest)
+            self.assertTrue(manifest['source_signing_and_store_metadata_removed'])
+
+    def test_entry_only_sticker_shop_and_friends_round_trip(self):
+        info = {**self.sample_info(), 'MinimumOSVersion': '18.0'}
+        original = bytearray(self.sample_binary())
+        sticker_shop = {
+            'file_offset': '0x190', 'original_hex': '10000000',
+            'patched_hex': '20000000',
+            'liff_route': {
+                'file_offset': '0x194', 'original_hex': '96000037',
+                'patched_hex': '1f2003d5',
+            },
+            'coin_entry': {
+                'file_offset': '0x19c', 'original_hex': '60008052',
+                'patched_hex': '00008052',
+            },
+        }
+        native = {
+            'guard_address': '0x100000198', 'deny_address': '0x1000001f8',
+            'kind_resolver_address': '0x100000100',
+            'command_resolver_address': '0x100000104',
+            'file_offset': '0x198', 'original_hex': '15030036',
+            'patched_hex': struct.pack('<I', main.analyze_patch_profile._branch26(
+                0x100000198, 0x100000140,
+            )).hex(),
+            'code_cave': {'address': '0x100000140', 'file_offset': '0x140'},
+        }
+        code = main.analyze_patch_profile.sticker_shop_native_code(native)
+        native['code_cave'].update(original_hex=bytes(len(code)).hex(), patched_hex=code.hex())
+        sticker_shop['native_routes'] = native
+        friends = {'patches': [
+            {'file_offset': hex(offset), 'original_hex': 'e8179f1a',
+             'patched_hex': '08008052'}
+            for offset in (0x180, 0x188)
+        ]}
+        original[0x190:0x194] = bytes.fromhex(sticker_shop['original_hex'])
+        original[0x194:0x198] = bytes.fromhex(sticker_shop['liff_route']['original_hex'])
+        original[0x198:0x19C] = bytes.fromhex(native['original_hex'])
+        original[0x19C:0x1A0] = bytes.fromhex(sticker_shop['coin_entry']['original_hex'])
+        original[0x140:0x178] = bytes(len(code))
+        for patch in friends['patches']:
+            offset = int(patch['file_offset'], 16)
+            original[offset:offset + 4] = bytes.fromhex(patch['original_hex'])
+        original = bytes(original)
+        profile = main.PatchProfile(
+            '26.14.0', 'test', main.digest(original), 248, 0x100001030,
+            bytes.fromhex('40000036'), 'tbz w0, #0, 0x100001038',
+            home_friends=friends, sticker_shop=sticker_shop,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source, output = Path(directory) / 'input.ipa', Path(directory) / 'output.ipa'
+            with zipfile.ZipFile(source, 'w') as archive:
+                archive.writestr(main.EXECUTABLE, original)
+                archive.writestr(main.PLIST, plistlib.dumps(info))
+                archive.writestr('Payload/LINE.app/untouched', b'unchanged')
+            args = main.parse_args([
+                str(source), str(output), '--entry-only',
+                '--enable-sticker-shop', '--collapse-friends-on-launch',
+            ])
+            with mock.patch.object(main, 'parse_args', return_value=args), \
+                    mock.patch.object(main, 'select_profile', return_value=(profile, None)), \
+                    mock.patch('sys.stdout', new_callable=StringIO):
+                main.main()
+            expected = main.patch_sticker_shop(main.patch_friend_tab_default_collapsed(
+                main.patched_binary(original, profile), friends,
+            ), sticker_shop)
+            with zipfile.ZipFile(output) as archive:
+                self.assertEqual(archive.read(main.EXECUTABLE), expected)
+                self.assertEqual(archive.read('Payload/LINE.app/untouched'), b'unchanged')
+            manifest = json.loads(output.with_suffix('.manifest.json').read_text())
+            self.assertTrue(manifest['enable_sticker_shop'])
+            self.assertEqual(manifest['sticker_shop']['file_offset'], '0x190')
+            self.assertIn('0x190', manifest['changed_byte_offsets'])
+            self.assertEqual(manifest['sticker_shop']['liff_route'], sticker_shop['liff_route'])
+            self.assertIn('0x194', manifest['changed_byte_offsets'])
+            self.assertEqual(manifest['sticker_shop']['native_routes'], native)
+            self.assertIn('0x198', manifest['changed_byte_offsets'])
+            self.assertIn('0x140', manifest['changed_byte_offsets'])
+            self.assertEqual(manifest['sticker_shop']['coin_entry'], sticker_shop['coin_entry'])
+            self.assertIn('0x19c', manifest['changed_byte_offsets'])
+            self.assertIn('real-device', manifest['sticker_shop']['verification'])
+
+    def test_sticker_shop_refuses_missing_profile_or_hash_before_writing(self):
+        original = self.sample_binary()
+        for sha, section in ((main.digest(original), None), ('0' * 64, {})):
+            with self.subTest(sha=sha), tempfile.TemporaryDirectory() as directory:
+                source, output = Path(directory) / 'input.ipa', Path(directory) / 'output.ipa'
+                with zipfile.ZipFile(source, 'w') as archive:
+                    archive.writestr(main.EXECUTABLE, original)
+                    archive.writestr(main.PLIST, plistlib.dumps(self.sample_info()))
+                profile = main.PatchProfile(
+                    '26.14.0', 'test', sha, 248, 0x100001030,
+                    bytes.fromhex('40000036'), 'tbz w0, #0, 0x100001038',
+                    sticker_shop=section,
+                )
+                args = main.parse_args([
+                    str(source), str(output), '--entry-only', '--enable-sticker-shop',
+                ])
+                with mock.patch.object(main, 'parse_args', return_value=args), \
+                        mock.patch.object(main, 'select_profile', return_value=(profile, None)), \
+                        self.assertRaises(ValueError):
+                    main.main()
+                self.assertFalse(output.exists())
+                self.assertFalse(output.with_suffix('.manifest.json').exists())
 
     def test_streamed_archive_copy_rejects_corrupt_member(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -339,6 +471,38 @@ class MainToolTests(unittest.TestCase):
             source['CFBundleIcons']['CFBundlePrimaryIcon']['CFBundleIconName'],
             'basic_default',
         )
+
+    def test_stale_signing_and_store_metadata_are_excluded(self):
+        retained = [
+            main.PLIST,
+            main.EXECUTABLE,
+            'iTunesArtwork',
+            'Payload/LINE.app/Frameworks/Test.framework/_CodeSignature/CodeResources',
+            'Payload/LINE.app/Resources/META-INF/license',
+            'Payload/LINE.app/Metadata.appintents/version.json',
+        ]
+        removed = [
+            'Payload/LINE.app/_CodeSignature/',
+            'Payload/LINE.app/_CodeSignature/CodeResources',
+            'META-INF/',
+            'META-INF/com.apple.ZipMetadata.plist',
+            'META-INF/com.apple.FixedZipMetadata.bin',
+            'iTunesMetadata.plist',
+            'Payload/LINE.app/SC_Info/',
+            'Payload/LINE.app/SC_Info/Manifest.plist',
+            'Payload/LINE.app/SC_Info/LINE.sinf',
+            'Payload/LINE.app/Frameworks/Test.framework/SC_Info/',
+            'Payload/LINE.app/Frameworks/Test.framework/SC_Info/Test.sinf',
+        ]
+        self.assertEqual(main.retained_archive_members(retained + removed), retained)
+
+    def test_notification_background_settings_are_preserved(self):
+        source = self.sample_info()
+        source['UIBackgroundModes'] = ['audio', 'remote-notification', 'voip']
+        source['NSSupportsLiveActivities'] = True
+        output = plistlib.loads(main.patched_info_plist(source))
+        self.assertEqual(output['UIBackgroundModes'], source['UIBackgroundModes'])
+        self.assertTrue(output['NSSupportsLiveActivities'])
 
     def test_icon_picker_registers_all_icons_and_original_primary(self):
         source = self.sample_info()
@@ -521,6 +685,15 @@ class MainToolTests(unittest.TestCase):
                 '--collapse-friends-on-launch',
             ])
         self.assertTrue(args.collapse_friends_on_launch)
+
+    def test_sticker_shop_option_is_opt_in_and_requires_verified_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [str(Path(directory) / 'input.ipa'),
+                     str(Path(directory) / 'output.ipa')]
+            self.assertFalse(main.parse_args(paths).enable_sticker_shop)
+            self.assertTrue(main.parse_args(paths + ['--enable-sticker-shop']).enable_sticker_shop)
+            with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+                main.parse_args(paths + ['--enable-sticker-shop', '--allow-unverified'])
 
     def test_tab_diagnostics_requires_promotional_tabs(self):
         with tempfile.TemporaryDirectory() as directory:

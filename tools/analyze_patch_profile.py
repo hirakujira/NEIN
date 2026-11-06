@@ -646,7 +646,7 @@ def _cstring(address, image):
     return image.data[offset:end].decode('utf-8', 'replace')
 
 
-def _objc_methods(image):
+def _objc_methods(image, target_class='NLAuthenticationManager'):
     classlist = image.section('__objc_classlist', '__DATA_CONST')
     methods = []
     class_count = classlist.size // 8
@@ -673,7 +673,7 @@ def _objc_methods(image):
             data_offset = image.file_offset(data_address)
             name_raw = struct.unpack_from('<Q', image.data, data_offset + 24)[0]
             class_name = _cstring(_decode_image_pointer(name_raw, image), image)
-            if class_name != 'NLAuthenticationManager':
+            if class_name != target_class:
                 continue
             method_raw = struct.unpack_from('<Q', image.data, data_offset + 32)[0]
             if not method_raw:
@@ -683,7 +683,7 @@ def _objc_methods(image):
             flags, count = struct.unpack_from('<II', image.data, method_offset)
             entry_size = flags & 0xffff
             if entry_size < 12 or count > 512:
-                raise ValueError('Invalid NLAuthenticationManager method list.')
+                raise ValueError(f'Invalid {target_class} method list.')
             if method_offset + 8 + count * entry_size > len(image.data):
                 raise ValueError('Objective-C method list exceeds the executable.')
             for method_index in range(count):
@@ -1375,6 +1375,369 @@ def _validate_home_friends_section(profile, executable):
         )
 
 
+def _branch26(source, target, link=False):
+    delta = target - source
+    if delta % 4 or not -(1 << 27) <= delta < (1 << 27):
+        raise ValueError('Shop patch branch is out of range.')
+    return (0x94000000 if link else 0x14000000) | ((delta >> 2) & 0x3FFFFFF)
+
+
+def sticker_shop_native_code(native):
+    cave = int(native['code_cave']['address'], 16)
+    success = int(native['guard_address'], 16) + 4
+    deny = int(native['deny_address'], 16)
+    kind = int(native['kind_resolver_address'], 16)
+    command = int(native['command_resolver_address'], 16)
+    # Preserve the normal result; secondary devices only reach valid sticker routes.
+    words = (
+        0x36000055, _branch26(cave + 4, success),
+        0xA9BF7BFD, 0xAA1303E0, _branch26(cave + 16, kind, link=True),
+        0x350000E0, 0xAA1303E0, _branch26(cave + 28, command, link=True),
+        0x7100241F, 0x54000062, 0xA8C17BFD, _branch26(cave + 44, success),
+        0xA8C17BFD, _branch26(cave + 52, deny),
+    )
+    return struct.pack('<14I', *words)
+
+
+def _analyze_native_sticker_routes(executable, image, liff_route):
+    def words(address, count):
+        return struct.unpack(
+            f'<{count}I', _bounded(executable, image.file_offset(address), count * 4, 'native shop'),
+        )
+
+    def call(address):
+        instruction, = words(address, 1)
+        if instruction & 0xFC000000 != 0x94000000:
+            raise ValueError('Expected native shop call.')
+        return address + (_sign_extend(instruction & 0x3FFFFFF, 26) << 2)
+
+    def cases(resolver):
+        adrp, add = words(resolver + 20, 2)
+        if adrp & 0x9F00001F != 0x90000000 or add & 0xFFC003FF != 0x91000000:
+            raise ValueError('Expected shop string-switch table.')
+        immediate = ((adrp >> 5) & 0x7FFFF) << 2 | ((adrp >> 29) & 3)
+        address = ((resolver + 20) & ~0xFFF) + (_sign_extend(immediate, 21) << 12) + ((add >> 10) & 0xFFF)
+        offset = image.file_offset(address)
+        count, = struct.unpack('<Q', _bounded(executable, offset + 16, 8, 'shop cases'))
+        if count not in (4, 10):
+            raise ValueError('Unexpected shop string-switch size.')
+        result = []
+        for index in range(count):
+            raw, length, flags = struct.unpack(
+                '<QQQ', _bounded(executable, offset + 32 + index * 24, 24, 'shop case'),
+            )
+            value = _cstring(_decode_image_pointer(raw, image), image)
+            if len(value) != length or flags != 2:
+                raise ValueError('Invalid shop string-switch case.')
+            result.append(value)
+        return result
+
+    try:
+        matcher = int(liff_route['matcher_address'], 16)
+        _, matcher_end = _function_bounds(matcher, image)
+        candidates = [
+            address for address in range(matcher_end, matcher_end + 0x400, 4)
+            if words(address, 1)[0] & 0xFC000000 == 0x94000000 and call(address) == matcher
+        ]
+        if len(candidates) != 1:
+            return None
+        site = candidates[0]
+        signature = words(site, 16)
+        if (
+            signature[1] != 0x360003A0 or
+            signature[4] != 0x9102C2C1 or
+            signature[6] != 0xA9405295 or
+            signature[8:10] != (0xD63F02A0, 0xAA0003F5) or
+            signature[11:14] != (0x36000315, 0xF94072D4, 0xAA1303E0) or
+            signature[15] != 0x36000420
+        ):
+            return None
+        helper = call(site + 56)
+        helper_words = words(helper + 56, 7)
+        if (
+            helper_words[0] != 0xAA1303E0 or
+            helper_words[2:4] != (0x12001C16, 0xAA1303E0) or
+            helper_words[5:7] != (0x35000476, 0x12001C08)
+        ):
+            return None
+        kind = call(helper + 60)
+        command = call(helper + 72)
+        if (
+            call(kind + 16) != call(command + 16) or
+            words(kind + 52, 2) != (0x12001C00, 0x7100101F) or
+            words(kind + 72, 1) != (0x52800000,) or
+            words(command + 56, 2) != (0x12001C00, 0x7100281F) or
+            words(command + 76, 1) != (0x52800120,) or
+            cases(call(kind + 48)) != ['sticker', 'emoji', 'theme', 'accountRegist'] or
+            cases(call(command + 52)) != [
+                'new', 'hot', 'event', 'category', 'author', 'detail',
+                'premium', 'download', 'preview', 'invalid',
+            ]
+        ):
+            return None
+
+        cave_offset = image.text_offset - 0x100
+        cave_address = image.text_address - 0x100
+        command_end = 32 + struct.unpack_from('<I', executable, 20)[0]
+        if (
+            cave_offset % 4 or command_end + 72 > cave_offset or
+            any(_bounded(executable, cave_offset, 0x100, 'shop code cave'))
+        ):
+            return None
+        cursor = 32
+        executable_header = False
+        while cursor < command_end:
+            cmd, size = struct.unpack_from('<II', executable, cursor)
+            if size < 8 or cursor + size > command_end:
+                return None
+            if cmd == 0x19 and executable[cursor + 8:cursor + 24].rstrip(b'\0') == b'__TEXT':
+                file_offset, = struct.unpack_from('<Q', executable, cursor + 40)
+                protection, = struct.unpack_from('<I', executable, cursor + 60)
+                executable_header = file_offset == 0 and protection == 5
+            cursor += size
+        if not executable_header or cursor != command_end:
+            return None
+        guard = site + 44
+        deny = guard + 0x60
+        native = {
+            'kind': 'native_sticker_routes',
+            'guard_address': hex(guard),
+            'deny_address': hex(deny),
+            'kind_resolver_address': hex(kind),
+            'command_resolver_address': hex(command),
+            'file_offset': hex(image.file_offset(guard)),
+            'original_hex': '15030036',
+            'patched_hex': struct.pack('<I', _branch26(guard, cave_address)).hex(),
+            'code_cave': {'address': hex(cave_address), 'file_offset': hex(cave_offset)},
+        }
+        code = sticker_shop_native_code(native)
+        native['code_cave'].update(original_hex=bytes(len(code)).hex(), patched_hex=code.hex())
+        return native
+    except (KeyError, TypeError, ValueError, struct.error):
+        return None
+
+
+def _analyze_sticker_liff_route(executable, image):
+    signature = bytes.fromhex('9600003777000037160080520b000014')
+    text = _bounded(executable, image.text_offset, image.text_size, '__text')
+    cursor = text.find(signature)
+    if cursor < 0 or cursor % 4 or text.find(signature, cursor + 1) >= 0:
+        return None
+    offset = image.text_offset + cursor
+    address = image.text_address + cursor
+    start, end = _function_bounds(address, image)
+    if address - 136 < start or address + 132 > end:
+        return None
+
+    def words(at, count):
+        return struct.unpack(
+            f'<{count}I', _bounded(executable, image.file_offset(at), count * 4, 'shop matcher'),
+        )
+
+    def call_target(at):
+        word, = words(at, 1)
+        if word & 0xFC000000 != 0x94000000:
+            raise ValueError('Expected shop matcher call.')
+        return at + (_sign_extend(word & 0x3FFFFFF, 26) << 2)
+
+    def page_address(at, register):
+        adrp, add = words(at, 2)
+        if (
+            adrp & 0x9F00001F != 0x90000000 | register or
+            add & 0xFFC003FF != 0x91000000 | register << 5 | register
+        ):
+            raise ValueError('Expected shop matcher address.')
+        immediate = ((adrp >> 5) & 0x7FFFF) << 2 | ((adrp >> 29) & 3)
+        return (at & ~0xFFF) + (_sign_extend(immediate, 21) << 12) + ((add >> 10) & 0xFFF)
+
+    # The first app-ID match is sticker-only; retain the theme and shop matches.
+    delta = 0 if words(address + 120, 2) == (0x2A160268, 0x12000100) else 4
+    before = words(address - 132 - delta, 11)
+    if (
+        before[:4] != (0x528E0C37, 0x72A00E17, 0xD2FC6018, 0xA9026017) or
+        before[5:7] != (0xA9400008, 0xA9030288) or
+        (before[8] != 0xAA1403E0 if delta == 0 else before[8] & 0xFC000000 != 0x94000000) or
+        before[10] != 0xAA0003F6 or
+        words(address - 44 - delta, 6) != (
+            0xA9026017, 0xD1008108, 0xB2410108,
+            0xD2800269, 0xF2FA0009, 0xA9032009,
+        ) or
+        words(address + 84, 4) != (
+            0x528D0E68, 0x72AE0DE8, 0xD2FC8009, 0xA9022408,
+        ) or
+        words(address + 120 + delta, 2) != (0x2A160268, 0x12000100)
+    ):
+        return None
+    try:
+        if not (
+            call_target(address - 96 - delta) ==
+            call_target(address - 20) ==
+            call_target(address + 100 + delta)
+        ):
+            return None
+        getter = call_target(address - 116 - delta)
+        if words(getter + 8, 1) != (0xD65F03C0,):
+            return None
+        string_address = page_address(getter, 0)
+        length, raw = struct.unpack(
+            '<QQ', _bounded(executable, image.file_offset(string_address), 16, 'sticker LIFF ID'),
+        )
+        sticker_id = _cstring(_decode_image_pointer(raw, image) + 32, image)
+        theme_id = _cstring(page_address(address - 52 - delta, 8), image)
+        if length != 0xD000000000000013 or sticker_id != '1359301715-JKd7Y7j1' or theme_id != '1359301715-lw9jxjqV':
+            return None
+    except ValueError:
+        return None
+    return {
+        'kind': 'sticker_liff_fallback',
+        'scheme': 'LineShopScheme',
+        'liff_id': sticker_id,
+        'theme_liff_id': theme_id,
+        'matcher_address': hex(start),
+        'file_offset': hex(offset),
+        'original_hex': signature[:4].hex(),
+        'patched_hex': NOP.to_bytes(4, 'little').hex(),
+    }
+
+
+def _analyze_coin_entry(executable, image, gate):
+    text = _bounded(executable, image.text_offset, image.text_size, '__text')
+    original = bytes.fromhex('60008052')
+    matches = []
+    cursor = text.find(original)
+    expected = (
+        0xB24403BD, 0xD10083FF, 0xA9017BFD, 0xF90007F6, 0x910043FD,
+        0xF9400AC0, 0x94000000, 0xD2800000, 0x94000000, 0xAA0003F4,
+        0x52800060, 0x94000000, 0xF94006C1, 0x12000000, 0xD2800014,
+        0xA9417BFD, 0x9243FBBD, 0x910083FF, 0xD61F0020,
+    )
+    while cursor >= 0:
+        address = image.text_address + cursor
+        if cursor % 4 == 0 and cursor >= 40 and cursor + 36 <= len(text):
+            start, end = _function_bounds(address, image)
+            words = struct.unpack_from('<19I', text, cursor - 40)
+            masked = tuple(
+                word & 0xFC000000 if index in (6, 8, 11) else word
+                for index, word in enumerate(words)
+            )
+            if (
+                start == address - 40 and end == start + 76 and masked == expected and
+                start + 44 + (_sign_extend(words[11] & 0x3FFFFFF, 26) << 2) == gate
+            ):
+                accessor = start + 32 + (_sign_extend(words[8] & 0x3FFFFFF, 26) << 2)
+                try:
+                    accessor_bounds = _function_bounds(accessor, image)
+                    metadata = struct.unpack(
+                        '<8I', _bounded(executable, image.file_offset(accessor), 32, 'coin metadata accessor'),
+                    )
+                    if (
+                        accessor_bounds == (accessor, accessor + 32) and
+                        metadata[:2] == (0xA9BF7BFD, 0x910003FD) and
+                        metadata[2] & 0x9F00001F == 0x90000000 and
+                        metadata[3] & 0xFFC003FF == 0x91000000 and
+                        metadata[4] & 0xFC000000 == 0x94000000 and
+                        metadata[5:] == (0xD2800001, 0xA8C17BFD, 0xD65F03C0)
+                    ):
+                        matches.append((start, image.text_offset + cursor))
+                except ValueError:
+                    pass
+        cursor = text.find(original, cursor + 1)
+    if len(matches) != 1:
+        return None
+    callback, offset = matches[0]
+    return {
+        'kind': 'coin_entry_uses_sticker_feature',
+        'side_effects': ['CanUseCoinFeatureSideEffect', 'CanUseLineCoinFeatureSideEffect'],
+        'original_feature': 3,
+        'enabled_feature': 0,
+        'callback_address': hex(callback),
+        'file_offset': hex(offset),
+        'original_hex': original.hex(),
+        'patched_hex': '00008052',
+    }
+
+
+def analyze_sticker_shop_executable(executable):
+    """Locate audited sticker routes and their shared coin-entry gate."""
+    image = parse_image(executable)
+    methods = [
+        method for method in _objc_methods(image, 'UniversalFeatureController')
+        if method['is_class_method'] and method['selector'] == 'canUseFeature:'
+    ]
+    if len(methods) != 1:
+        return None
+    start, end = _function_bounds(methods[0]['implementation'], image)
+    calls = []
+    for address in range(start, end, 4):
+        word = struct.unpack_from('<I', executable, image.file_offset(address))[0]
+        if word & 0xFC000000 == 0x94000000:
+            calls.append(address + (_sign_extend(word & 0x3FFFFFF, 26) << 2))
+    if len(calls) != 2:
+        return None
+    gate = calls[-1]
+    offset = image.file_offset(gate)
+    words = struct.unpack('<21I', _bounded(executable, offset, 84, 'feature gate'))
+    # Keep w0=1 from before the switch and enter the existing return path.
+    # The named sticker-shop side effects pass feature 0 in the audited builds.
+    if (
+        words[6:8] != (0xAA0003E8, 0xF100D81F) or
+        words[8] & 0xFF00001F != 0x54000008 or
+        words[9] != 0x52800020 or
+        words[10] & 0x9F00001F != 0x90000009 or
+        words[11] & 0xFFC003FF != 0x91000129 or
+        words[12:16] != (0x1000000A, 0xB8A8792B, 0x8B0B014A, 0xD61F0140) or
+        words[16] & 0xFC000000 != 0x94000000 or
+        words[17] != 0xAA0003F4 or
+        words[18] & 0xFC000000 != 0x94000000 or
+        words[19] != 0x12000000 or
+        not (words[20] & 0xFC000000 == 0x14000000 or words[20] == 0xA9447BFD)
+    ):
+        return None
+    immediate = ((words[10] >> 5) & 0x7FFFF) << 2 | ((words[10] >> 29) & 3)
+    table = (
+        ((gate + 40) & ~0xFFF) + (_sign_extend(immediate, 21) << 12) +
+        ((words[11] >> 10) & 0xFFF)
+    )
+    table_offset = image.file_offset(table)
+    if (
+        table % 4 or table < gate + 84 or
+        table + 55 * 4 > image.text_address + image.text_size or
+        _bounded(executable, table_offset, 4, 'feature dispatch') != b'\x10\0\0\0'
+    ):
+        return None
+    liff_route = _analyze_sticker_liff_route(executable, image)
+    if liff_route is None:
+        return None
+    native_routes = _analyze_native_sticker_routes(executable, image, liff_route)
+    if native_routes is None:
+        return None
+    coin_entry = _analyze_coin_entry(executable, image, gate)
+    if coin_entry is None:
+        return None
+    return {
+        'kind': 'sticker_shop_feature_gate',
+        'controller': 'UniversalFeatureController',
+        'selector': 'canUseFeature:',
+        'feature': 0,
+        'gate_address': hex(gate),
+        'file_offset': hex(table_offset),
+        'original_hex': '10000000',
+        'patched_hex': '20000000',
+        'liff_route': liff_route,
+        'native_routes': native_routes,
+        'coin_entry': coin_entry,
+    }
+
+
+def _validate_sticker_shop_section(profile, executable):
+    sticker_shop = profile.get('sticker_shop')
+    if sticker_shop is not None and (
+        not isinstance(sticker_shop, dict) or
+        analyze_sticker_shop_executable(executable) != sticker_shop
+    ):
+        raise ValueError('Combined profile sticker-shop dispatch mismatch.')
+
+
 def _validate_keychain_section(profile, executable):
     keychain = profile.get('keychain')
     if not isinstance(keychain, dict):
@@ -1424,6 +1787,7 @@ def validate_profile(profile, info, executable, allow_unverified=False):
         raise ValueError('Combined patch profile does not exactly match this IPA.')
     _validate_login_section(profile, executable)
     _validate_home_friends_section(profile, executable)
+    _validate_sticker_shop_section(profile, executable)
     _validate_keychain_section(profile, executable)
 
 

@@ -29,6 +29,7 @@ NEIN 在德文中就是「不／不要（No）」的意思。
 * NEIN 會將主 App 名稱設為 `NEIN`、Bundle ID 設為 `kinta.ma.nein`，並預設使用香蕉圖示。
 * 為避免誤觸原版連結，輸出版本不註冊 URL scheme。
 * 完成後請使用自己的憑證和 provisioning profile 完整重簽名再安裝。修改版可正常收發訊息，但不支援推播通知。
+* 打包時會移除原版主 App 的 `_CodeSignature/`、App 與 Framework 的 `SC_Info/`、`META-INF/` 與 `iTunesMetadata.plist`，避免舊資源清單及 FairPlay 複製清單仍引用已移除的擴充套件；完整重簽時必須重新產生資源簽章。
 * 重簽可以使用 [AltStore](https://altstore.io/) 或 [Sideloadly](https://sideloadly.io/)。
 
 預設使用副裝置模式（偽裝成 iPad 登入），建議使用副裝置先嘗試，以免影響帳號與內容，若要在主帳號嘗試，請務必先備份所有資料。
@@ -41,6 +42,12 @@ python3 tools/main.py --keychain-compat --remove-ads --hide-promotional-tabs --c
 
 `--collapse-friends-on-launch` 讓首頁的好友區塊在建立時預設收合；進入 App
 後仍可用原本的區塊控制手動展開。
+
+加上 `--enable-sticker-shop` 可實驗性開啟副裝置貼圖商店（預設關閉）。
+僅支援已核對 SHA-256 的 26.14.0、26.15.1、26.17.0 IPA，不可搭配 `--allow-unverified`。
+
+26.17.0 已確認可在原版 LINE 儲值後，到 NEIN 用既有代幣購買貼圖；
+NEIN 內不支援 IAP 儲值，付款與授權檢查不變。其他版本的購買流程尚未實測。
 
 `--hide-promotional-tabs` 會隱藏 VOOM、新聞、購物與「逛逛」（Discover）分頁按鈕。
 NEIN 無法從原本的入口正常開啟設定，所以分頁列最後會另外加上「設定」分頁；

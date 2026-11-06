@@ -35,6 +35,9 @@ ICON_PREVIEW_MANIFEST = 'NEINIconPreviews/manifest.json'
 REMOVED_ARCHIVE_PREFIXES = (
     'Payload/LINE.app/PlugIns/',
     'Payload/LINE.app/Watch/',
+    # Original signing and store catalogs no longer describe the modified app.
+    'Payload/LINE.app/_CodeSignature/',
+    'META-INF/',
 )
 DEFAULT_BUNDLE_ID = 'kinta.ma.nein'
 DEFAULT_APP_NAME = 'NEIN'
@@ -53,6 +56,7 @@ class PatchProfile:
     instruction: str
     keychain_profile: dict | None = None
     home_friends: dict | None = None
+    sticker_shop: dict | None = None
 
 
 def digest(data):
@@ -93,9 +97,11 @@ def retained_archive_members(names):
 
 
 def is_removed_archive_member(name):
+    # FairPlay replication paths can recreate removed extension directories.
     return (
+        name == 'iTunesMetadata.plist' or
         name.startswith(REMOVED_ARCHIVE_PREFIXES) or
-        (name.startswith(APP_ROOT) and '.appex/' in name)
+        (name.startswith(APP_ROOT) and ('.appex/' in name or '/SC_Info/' in name))
     )
 
 
@@ -282,6 +288,7 @@ def find_profile(info, original, allow_unverified=False, profile_dir=None):
         instruction=patch['instruction'],
         keychain_profile=document['keychain'],
         home_friends=document.get('home_friends'),
+        sticker_shop=document.get('sticker_shop'),
     )
     verify_profile_for_binary(profile, original)
     return profile
@@ -308,6 +315,7 @@ def select_profile(
         instruction=patch['instruction'],
         keychain_profile=profile['keychain'],
         home_friends=profile.get('home_friends'),
+        sticker_shop=profile.get('sticker_shop'),
     )
     analysis = {
         'mode': 'analyzed_and_saved' if created else 'saved_profile',
@@ -351,6 +359,47 @@ def patch_friend_tab_default_collapsed(binary, profile):
         ):
             raise ValueError('Expected FriendTabViewModel initial expansion instruction not found.')
         result[offset:offset + 4] = replacement
+    return bytes(result)
+
+
+def patch_sticker_shop(binary, profile):
+    if not isinstance(profile, dict):
+        raise ValueError('No audited sticker-shop patch is available for this IPA.')
+    try:
+        native = profile['native_routes']
+        cave = native['code_cave']
+        sites = (profile, profile['liff_route'], native, cave, profile['coin_entry'])
+        patches = [
+            (int(site['file_offset'], 16), bytes.fromhex(site['original_hex']),
+             bytes.fromhex(site['patched_hex']))
+            for site in sites
+        ]
+        guard_address = int(native['guard_address'], 16)
+        cave_address = int(cave['address'], 16)
+        code = analyze_patch_profile.sticker_shop_native_code(native)
+        if (
+            int(native['deny_address'], 16) != guard_address + 0x60 or
+            guard_address - patches[2][0] != cave_address - patches[3][0]
+        ):
+            raise ValueError('Native sticker-shop addresses do not match.')
+        guard_branch = struct.pack('<I', analyze_patch_profile._branch26(guard_address, cave_address))
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError('Malformed sticker-shop patch site.') from error
+    expected = ((b'\x10\0\0\0', b'\x20\0\0\0'),
+                (bytes.fromhex('96000037'), NOP),
+                (bytes.fromhex('15030036'), guard_branch), (bytes(len(code)), code),
+                (bytes.fromhex('60008052'), bytes.fromhex('00008052')))
+    ranges = sorted((offset, offset + len(original)) for offset, original, _ in patches)
+    if any(left[1] > right[0] for left, right in zip(ranges, ranges[1:])) or any(
+        offset < 0 or offset % 4 or offset + len(original) > len(binary) or
+        (original, replacement) != allowed or
+        binary[offset:offset + len(original)] != original
+        for (offset, original, replacement), allowed in zip(patches, expected)
+    ):
+        raise ValueError('Expected sticker-shop dispatch entry, LIFF branch or native guard not found.')
+    result = bytearray(binary)
+    for offset, original, replacement in patches:
+        result[offset:offset + len(original)] = replacement
     return bytes(result)
 
 
@@ -415,9 +464,13 @@ def parse_args(argv=None):
                         help='Add a tab-only JSON export button; requires --hide-promotional-tabs')
     parser.add_argument('--collapse-friends-on-launch', action='store_true',
                         help='Initialize the Friends section as collapsed')
+    parser.add_argument('--enable-sticker-shop', action='store_true',
+                        help='Experimentally enable audited sticker-shop routes and coin entry; normal billing and authorization still apply')
     parser.add_argument('--allow-unverified', action='store_true',
                         help='Allow a different executable hash for a known version/build; still checks the original ARM64 instruction')
     args = parser.parse_args(argv)
+    if args.enable_sticker_shop and args.allow_unverified:
+        parser.error('--enable-sticker-shop cannot be combined with --allow-unverified.')
     if args.tab_diagnostics and not args.hide_promotional_tabs:
         parser.error('--tab-diagnostics requires --hide-promotional-tabs.')
     if args.message_diagnostics:
@@ -449,6 +502,11 @@ def main():
         )
         if args.collapse_friends_on_launch and profile.home_friends is None:
             raise ValueError('No analyzed Friends patch is available for this IPA.')
+        if args.enable_sticker_shop:
+            if profile.sticker_shop is None:
+                raise ValueError('No audited sticker-shop patch is available for this IPA.')
+            if digest(original) != profile.executable_sha256:
+                raise ValueError('Sticker-shop patch requires an exact executable SHA-256 match.')
     output_info = patched_info_plist(info, enable_icon_picker=not args.entry_only)
     icon_preview_files = (
         {} if args.entry_only else
@@ -476,6 +534,8 @@ def main():
             modified = patch_friend_tab_default_collapsed(
                 modified, profile.home_friends,
             )
+        if args.enable_sticker_shop:
+            modified = patch_sticker_shop(modified, profile.sticker_shop)
         with zipfile.ZipFile(args.output, 'x') as target:
             target.comment = source.comment
             for entry in source.infolist():
@@ -499,8 +559,8 @@ def main():
                 entry.external_attr = 0o100644 << 16
                 entry.compress_type = zipfile.ZIP_DEFLATED
                 target.writestr(entry, content)
-    # Full round-trip comparison, excluding all embedded app extensions and the
-    # Watch app whose bundle IDs cannot remain valid after the main app is re-signed.
+    # Exclude stale signing/store metadata and embedded bundles whose IDs cannot
+    # remain valid after the main app is re-signed.
     with zipfile.ZipFile(args.input) as source, zipfile.ZipFile(args.output) as target:
         retained_names = retained_archive_members(source.namelist())
         expected_names = (
@@ -531,7 +591,7 @@ def main():
         raise AssertionError('Login entry instruction differs from the selected mode.')
     start = int(injection['load_command_offset'], 16) if injection else 0
     end = start + injection['load_command_size'] if injection else 0
-    friend_patch_ranges = (
+    optional_patch_ranges = (
         [
             (
                 int(patch['file_offset'], 16),
@@ -541,11 +601,19 @@ def main():
         ]
         if args.collapse_friends_on_launch else []
     )
+    if args.enable_sticker_shop:
+        native = profile.sticker_shop['native_routes']
+        for patch in (
+            profile.sticker_shop, profile.sticker_shop['liff_route'],
+            native, native['code_cave'], profile.sticker_shop['coin_entry'],
+        ):
+            offset = int(patch['file_offset'], 16)
+            optional_patch_ranges.append((offset, offset + len(bytes.fromhex(patch['original_hex']))))
     if len(modified) != len(original) or any(
             a != b and not (
                 (injection is not None and (16 <= i < 24 or start <= i < end)) or
                 profile.patch_offset <= i < profile.patch_offset + 4 or
-                any(start <= i < end for start, end in friend_patch_ranges)
+                any(start <= i < end for start, end in optional_patch_ranges)
             )
             for i, (a, b) in enumerate(zip(original, modified))):
         raise AssertionError('Changed bytes outside documented patch regions')
@@ -573,10 +641,12 @@ def main():
                 'icon_picker_enabled': not args.entry_only,
                 'icon_count': 0 if args.entry_only else len(app_icon_names(info)[1]),
                 'url_schemes_removed': True,
+                'source_signing_and_store_metadata_removed': True,
                 'message_diagnostics': args.message_diagnostics,
                 'remove_ads': args.remove_ads,
                 'hide_promotional_tabs': args.hide_promotional_tabs,
                 'collapse_friends_on_launch': args.collapse_friends_on_launch,
+                'enable_sticker_shop': args.enable_sticker_shop,
                 'tab_diagnostics': args.tab_diagnostics,
                 'source_ipa_sha256': digest_file(args.input),
                 'output_ipa_sha256': digest_file(args.output),
@@ -592,7 +662,8 @@ def main():
                     'No Keychain remapping.'
                 ),
                 'verification': ('All retained archive contents identical except the updated Info.plist '
-                                 'and documented Mach-O patches; all embedded app extensions and the Watch app were removed; '
+                                 'and documented Mach-O patches; original main-app signature resources and store metadata, '
+                                 'all embedded app extensions and the Watch app were removed; '
                                  'one dylib and verified icon preview assets were added; ZIP CRC passed; '
                                  'dylib ad hoc signature verified.')}
     if args.collapse_friends_on_launch:
@@ -605,6 +676,12 @@ def main():
                 patch['file_offset'] for patch in profile.home_friends['patches']
             ],
             'manual_toggle_preserved': True,
+        }
+    if args.enable_sticker_shop:
+        manifest['sticker_shop'] = {
+            **profile.sticker_shop,
+            'scope': 'Sticker availability, LIFF/native sticker routes and their shared coin entry checks only; global feature 3, theme/emoji/account guards, login identity, balance, billing, receipts, ownership and server authorization unchanged.',
+            'verification': 'Static dispatch, LIFF/native/coin entry and archive checks only for this build; no IAP support added. User-reported 26.17.0 sticker purchases use coins charged in original LINE; other versions still require real-device verification.',
         }
     if args.remove_ads or args.hide_promotional_tabs:
         manifest['ad_removal'] = {
@@ -654,7 +731,11 @@ def main():
             )
     if args.entry_only:
         manifest.update({
-            'scope': 'Secondary-login entry only; no injected dylib or container/Keychain hooks.',
+            'scope': (
+                'Secondary-login entry and sticker-shop availability; no injected dylib or container/Keychain hooks.'
+                if args.enable_sticker_shop else
+                'Secondary-login entry only; no injected dylib or container/Keychain hooks.'
+            ),
             'source_ipa': args.input.name,
             'output_ipa': args.output.name,
             'original_executable_sha256': digest(original),

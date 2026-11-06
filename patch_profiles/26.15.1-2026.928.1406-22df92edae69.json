@@ -125,5 +125,54 @@
   },
   "profile_type": "line_patch",
   "schema_version": 2,
+  "sticker_shop": {
+    "coin_entry": {
+      "callback_address": "0x100274e24",
+      "enabled_feature": 0,
+      "file_offset": "0x274e4c",
+      "kind": "coin_entry_uses_sticker_feature",
+      "original_feature": 3,
+      "original_hex": "60008052",
+      "patched_hex": "00008052",
+      "side_effects": [
+        "CanUseCoinFeatureSideEffect",
+        "CanUseLineCoinFeatureSideEffect"
+      ]
+    },
+    "controller": "UniversalFeatureController",
+    "feature": 0,
+    "file_offset": "0x744810",
+    "gate_address": "0x100744460",
+    "kind": "sticker_shop_feature_gate",
+    "liff_route": {
+      "file_offset": "0x39dc64",
+      "kind": "sticker_liff_fallback",
+      "liff_id": "1359301715-JKd7Y7j1",
+      "matcher_address": "0x10039db98",
+      "original_hex": "96000037",
+      "patched_hex": "1f2003d5",
+      "scheme": "LineShopScheme",
+      "theme_liff_id": "1359301715-lw9jxjqV"
+    },
+    "native_routes": {
+      "code_cave": {
+        "address": "0x100007f00",
+        "file_offset": "0x7f00",
+        "original_hex": "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "patched_hex": "55000036c7570e14fd7bbfa9e00313aa4f530e94e0000035e00313aae4510e941f24007162000054fd7bc1a8bd570e14fd7bc1a8d2570e14"
+      },
+      "command_resolver_address": "0x10039c6ac",
+      "deny_address": "0x10039de7c",
+      "file_offset": "0x39de1c",
+      "guard_address": "0x10039de1c",
+      "kind": "native_sticker_routes",
+      "kind_resolver_address": "0x10039cc4c",
+      "original_hex": "15030036",
+      "patched_hex": "39a8f117"
+    },
+    "original_hex": "10000000",
+    "patched_hex": "20000000",
+    "selector": "canUseFeature:"
+  },
   "version": "26.15.1"
 }
