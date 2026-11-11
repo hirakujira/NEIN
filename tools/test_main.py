@@ -759,19 +759,16 @@ class MainToolTests(unittest.TestCase):
         self.assertEqual(len(patched), len(original))
         self.assertEqual(struct.unpack_from('<I', patched, 0xc8)[0], 0x1B0100)
         self.assertEqual(result, {
-            'load_command_offset': '0xb8',
             'sdk_field_offset': '0xc8',
             'minimum_os': '18.0.0',
             'original_sdk': '26.5.0',
             'patched_sdk': '27.1.0',
-            'changed': True,
         })
 
     def test_iphone_duo_sdk_patch_keeps_newer_sdk(self):
         original = self.build_version_binary(sdk=0x1B0200)
         patched, result = main.patch_build_version_sdk(original)
         self.assertEqual(patched, original)
-        self.assertFalse(result['changed'])
         self.assertEqual(result['patched_sdk'], '27.2.0')
 
     def test_iphone_duo_sdk_patch_rejects_unexpected_build_version(self):
@@ -863,29 +860,20 @@ class MainToolTests(unittest.TestCase):
                     self.assertIsNone(manifest['iphone_duo'])
                     continue
                 section = manifest['iphone_duo']
-                self.assertEqual(section['build_version']['sdk_field_offset'], '0xc8')
-                self.assertEqual(section['build_version']['original_sdk'], '26.5.0')
-                self.assertEqual(section['build_version']['patched_sdk'], '27.1.0')
-                self.assertEqual(section['build_version']['minimum_os'], '18.0.0')
+                self.assertEqual(section['build_version'], {
+                    'sdk_field_offset': '0xc8', 'minimum_os': '18.0.0',
+                    'original_sdk': '26.5.0', 'patched_sdk': '27.1.0',
+                })
                 self.assertEqual(section['info_plist'], {
                     'DTSDKName': {'original': 'iphoneos26.5', 'patched': 'iphoneos27.1'},
                     'DTPlatformVersion': {'original': '26.5', 'patched': '27.1'},
                 })
-                self.assertEqual(section['vertical_bar'], 'disabled')
-                split = section['split_layout']
-                self.assertEqual(split['mode'], 'ipad_style_two_columns_on_iphone_duo_inner_display')
-                self.assertEqual(split['device_models'], ['iPhone19,4'])
-                self.assertEqual(split['minimum_window_short_side_points'], 600)
-                self.assertIn('traitOverrides.horizontalSizeClass', split['hook'])
-                self.assertIn('600pt', split['hook'])
-                self.assertIn('oneBesideSecondary', split['columns'])
-                self.assertIn('iPhone19,4', split['install_guard'])
-                self.assertIn('real-device', section['verification'])
+                self.assertEqual(section['split_layout']['device_model'], 'iPhone19,4')
+                self.assertEqual(section['split_layout']['minimum_window_short_side_points'], 600)
 
     def test_iphone_duo_split_guard_matches_hook(self):
         header = (main.ROOT / 'hooks' / 'NEINDuoSplitLayout.h').read_text(encoding='utf-8')
-        self.assertEqual(main.IPHONE_DUO_MODELS, ('iPhone19,4',))
-        self.assertIn('NEINDuoModelIdentifier = @"iPhone19,4";', header)
+        self.assertIn('NEINDuoModelIdentifier = @"%s";' % main.IPHONE_DUO_MODEL, header)
         self.assertIn(
             'NEINDuoSplitMinimumCanvasSide = %d;' % main.IPHONE_DUO_SPLIT_MINIMUM_SIDE, header,
         )

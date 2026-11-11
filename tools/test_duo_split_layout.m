@@ -16,31 +16,20 @@ typedef NS_ENUM(NSInteger, UIUserInterfaceSizeClass) {
 @implementation UITraitHorizontalSizeClass
 @end
 
-@protocol UITraitOverrides <NSObject>
+@interface NEINTestTraitOverrides : NSObject
 @property(nonatomic) UIUserInterfaceSizeClass horizontalSizeClass;
-- (BOOL)containsTrait:(Class)trait;
-- (void)removeTrait:(Class)trait;
-@end
-
-@interface NEINTestTraitOverrides : NSObject <UITraitOverrides>
-@property(nonatomic) BOOL hasHorizontalSizeClass;
 @property(nonatomic) NSUInteger writes;
 @property(nonatomic) NSUInteger removals;
+- (void)removeTrait:(Class)trait;
 @end
 @implementation NEINTestTraitOverrides
-@synthesize horizontalSizeClass = _horizontalSizeClass;
 - (void)setHorizontalSizeClass:(UIUserInterfaceSizeClass)sizeClass {
     _horizontalSizeClass = sizeClass;
-    self.hasHorizontalSizeClass = YES;
     self.writes++;
 }
-- (BOOL)containsTrait:(Class)trait {
-    return trait == UITraitHorizontalSizeClass.class && self.hasHorizontalSizeClass;
-}
 - (void)removeTrait:(Class)trait {
-    if (trait != UITraitHorizontalSizeClass.class) return;
+    assert(trait == UITraitHorizontalSizeClass.class);
     _horizontalSizeClass = UIUserInterfaceSizeClassUnspecified;
-    self.hasHorizontalSizeClass = NO;
     self.removals++;
 }
 @end
@@ -88,29 +77,6 @@ __attribute__((objc_runtime_name("_TtC4LINE21NLSplitViewController")))
 }
 @end
 
-__attribute__((objc_runtime_name("_TtC4LINE18FakeFallbackTarget")))
-@interface NEINFakeFallbackTarget : NSObject
-@end
-@implementation NEINFakeFallbackTarget
-@end
-
-@interface OtherFakeFallbackTarget : NSObject
-@end
-@implementation OtherFakeFallbackTarget
-@end
-
-__attribute__((objc_runtime_name("_TtC4LINE15FirstTwinTarget")))
-@interface NEINFirstTwinTarget : NSObject
-@end
-@implementation NEINFirstTwinTarget
-@end
-
-__attribute__((objc_runtime_name("_TtC4LINE16SecondTwinTarget")))
-@interface NEINSecondTwinTarget : NSObject
-@end
-@implementation NEINSecondTwinTarget
-@end
-
 #include "../hooks/NEINDuoSplitLayout.h"
 
 static UIView *NEINTestView(CGSize window, CGSize view) {
@@ -123,46 +89,35 @@ static UIView *NEINTestView(CGSize window, CGSize view) {
     return result;
 }
 
+static BOOL NEINTestWide(CGSize canvas) {
+    NEINFakeSplitViewController *split = [NEINFakeSplitViewController new];
+    NEINDuoUpdateSplitTraits(split, canvas);
+    return split.traitOverrides.horizontalSizeClass == UIUserInterfaceSizeClassRegular;
+}
+
 int main(void) {
     @autoreleasepool {
         const CGSize unfolded = CGSizeMake(951, 669);
         const CGSize folded = CGSizeMake(466, 678);
         const CGSize maxLandscape = CGSizeMake(956, 440);
 
-        assert(NEINDuoModelSupportsSplitLayout(@"iPhone19,4"));
-        assert(!NEINDuoModelSupportsSplitLayout(@"iPhone19,5"));
-        assert(!NEINDuoModelSupportsSplitLayout(@"iPhone18,1"));
-        assert(!NEINDuoModelSupportsSplitLayout(@"arm64"));
-        assert(!NEINDuoModelSupportsSplitLayout(nil));
-        // A Mac reports its architecture here, never an iPhone model.
-        assert(NEINDuoMachineModel().length > 0);
-        assert(!NEINDuoModelSupportsSplitLayout(NEINDuoMachineModel()));
-
-        assert(NEINDuoCanvasFitsSplitLayout(unfolded));
-        assert(NEINDuoCanvasFitsSplitLayout(CGSizeMake(669, 951)));
-        assert(NEINDuoCanvasFitsSplitLayout(CGSizeMake(600, 600)));
-        assert(!NEINDuoCanvasFitsSplitLayout(folded));
-        assert(!NEINDuoCanvasFitsSplitLayout(CGSizeMake(599.5, 900)));
-        assert(!NEINDuoCanvasFitsSplitLayout(maxLandscape));
-        assert(!NEINDuoCanvasFitsSplitLayout(CGSizeZero));
-
-        assert(NEINDuoLineClass(@"_TtC4LINE21NLSplitViewController", @"Unused") ==
-               NEINFakeSplitViewController.class);
-        assert(NEINDuoLineClass(@"_TtC4LINE99Missing", @"FakeFallbackTarget") ==
-               NEINFakeFallbackTarget.class);
-        assert(NEINDuoLineClass(@"_TtC4LINE99Missing", @"TwinTarget") == Nil);
-        assert(NEINDuoLineClass(@"_TtC4LINE99Missing", @"NoSuchTarget") == Nil);
-
-        SEL layoutSelector = @selector(viewDidLayoutSubviews);
-        assert(NEINDuoOwnMethod(UISplitViewController.class, layoutSelector) == NULL);
-        assert(NEINDuoOwnMethod(NEINFakeSplitViewController.class, layoutSelector) != NULL);
+        assert(NEINTestWide(unfolded));
+        assert(NEINTestWide(CGSizeMake(669, 951)));
+        assert(NEINTestWide(CGSizeMake(600, 600)));
+        assert(!NEINTestWide(folded));
+        assert(!NEINTestWide(CGSizeMake(599.5, 900)));
+        assert(!NEINTestWide(maxLandscape));
+        assert(!NEINTestWide(CGSizeZero));
 
         NEINFakeSplitViewController *split = [NEINFakeSplitViewController new];
         NEINTestTraitOverrides *overrides = split.traitOverrides;
         split.viewIfLoaded = NEINTestView(unfolded, unfolded);
 
-        // Other iPhones never install the hook.
-        assert(!NEINInstallDuoSplitLayout(@"iPhone18,1"));
+        // Other iPhones never install the hook; a Mac reports its architecture.
+        assert(NEINDuoMachineModel().length > 0);
+        for (NSString *model in @[@"iPhone19,5", @"iPhone18,1", NEINDuoMachineModel()]) {
+            assert(!NEINInstallDuoSplitLayout(model));
+        }
         assert(!NEINInstallDuoSplitLayout(nil));
         [split viewDidLayoutSubviews];
         assert(split.layoutCount == 1);
@@ -178,7 +133,6 @@ int main(void) {
 
         [split viewDidLayoutSubviews];
         assert(split.layoutCount == 2);
-        assert([overrides containsTrait:UITraitHorizontalSizeClass.class]);
         assert(overrides.horizontalSizeClass == UIUserInterfaceSizeClassRegular);
         assert(overrides.writes == 1);
         [split viewDidLayoutSubviews];
@@ -186,7 +140,7 @@ int main(void) {
 
         split.viewIfLoaded = NEINTestView(folded, folded);
         [split viewDidLayoutSubviews];
-        assert(![overrides containsTrait:UITraitHorizontalSizeClass.class]);
+        assert(overrides.horizontalSizeClass == UIUserInterfaceSizeClassUnspecified);
         assert(overrides.removals == 1);
         [split viewDidLayoutSubviews];
         assert(overrides.removals == 1);
@@ -220,7 +174,6 @@ int main(void) {
         other.traitOverrides.horizontalSizeClass = UIUserInterfaceSizeClassCompact;
         other.viewIfLoaded = NEINTestView(folded, folded);
         [other viewDidLayoutSubviews];
-        assert([other.traitOverrides containsTrait:UITraitHorizontalSizeClass.class]);
         assert(other.traitOverrides.horizontalSizeClass == UIUserInterfaceSizeClassCompact);
         assert(other.traitOverrides.removals == 0);
         puts("iPhone Duo split layout tests passed (view doubles).");

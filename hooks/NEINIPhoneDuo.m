@@ -2,8 +2,7 @@
 // visible tab bar mirrors the original horizontal bar, so keep bars horizontal.
 // The unfolded inner display also gets LINE's iPad-style split layout.
 #import <UIKit/UIKit.h>
-#import <objc/runtime.h>
-#include <string.h>
+#include "NEINDuoSplitLayout.h"
 
 // UIVerticalBarBehaviorDisabled; the enum is absent from pre-27.1 SDK headers.
 static const NSInteger NEINVerticalBarBehaviorDisabled = 1;
@@ -14,15 +13,12 @@ static NSInteger NEINDisabledVerticalBarBehavior(id self, SEL selector) {
     return NEINVerticalBarBehaviorDisabled;
 }
 
-#include "NEINDuoSplitLayout.h"
-
 static void NEINInstallIPhoneDuoCompat(void) {
     NEINInstallDuoSplitLayout(NEINDuoMachineModel());
     if (@available(iOS 27.1, *)) {
         Method method = class_getInstanceMethod(
             UIViewController.class, NSSelectorFromString(@"preferredVerticalBarBehavior"));
-        const char *types = method ? method_getTypeEncoding(method) : NULL;
-        if (!types || strcmp(types, "q16@0:8") != 0) return;
+        if (!NEINMethodHasType(method, "q", 2, NULL, NULL)) return;
         method_setImplementation(method, (IMP)NEINDisabledVerticalBarBehavior);
     }
 }
