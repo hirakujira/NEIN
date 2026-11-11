@@ -1,5 +1,6 @@
 // iOS 27.1 SDK builds get vertical bars on wide iPhone Duo layouts. NEIN's
 // visible tab bar mirrors the original horizontal bar, so keep bars horizontal.
+// The unfolded inner display also gets LINE's iPad-style split layout.
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #include <string.h>
@@ -13,7 +14,10 @@ static NSInteger NEINDisabledVerticalBarBehavior(id self, SEL selector) {
     return NEINVerticalBarBehaviorDisabled;
 }
 
+#include "NEINDuoSplitLayout.h"
+
 static void NEINInstallIPhoneDuoCompat(void) {
+    NEINInstallDuoSplitLayout(NEINDuoMachineModel());
     if (@available(iOS 27.1, *)) {
         Method method = class_getInstanceMethod(
             UIViewController.class, NSSelectorFromString(@"preferredVerticalBarBehavior"));

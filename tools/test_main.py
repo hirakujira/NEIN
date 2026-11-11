@@ -872,7 +872,23 @@ class MainToolTests(unittest.TestCase):
                     'DTPlatformVersion': {'original': '26.5', 'patched': '27.1'},
                 })
                 self.assertEqual(section['vertical_bar'], 'disabled')
+                split = section['split_layout']
+                self.assertEqual(split['mode'], 'ipad_style_two_columns_on_iphone_duo_inner_display')
+                self.assertEqual(split['device_models'], ['iPhone19,4'])
+                self.assertEqual(split['minimum_window_short_side_points'], 600)
+                self.assertIn('traitOverrides.horizontalSizeClass', split['hook'])
+                self.assertIn('600pt', split['hook'])
+                self.assertIn('oneBesideSecondary', split['columns'])
+                self.assertIn('iPhone19,4', split['install_guard'])
                 self.assertIn('real-device', section['verification'])
+
+    def test_iphone_duo_split_guard_matches_hook(self):
+        header = (main.ROOT / 'hooks' / 'NEINDuoSplitLayout.h').read_text(encoding='utf-8')
+        self.assertEqual(main.IPHONE_DUO_MODELS, ('iPhone19,4',))
+        self.assertIn('NEINDuoModelIdentifier = @"iPhone19,4";', header)
+        self.assertIn(
+            'NEINDuoSplitMinimumCanvasSide = %d;' % main.IPHONE_DUO_SPLIT_MINIMUM_SIDE, header,
+        )
 
 
 if __name__ == '__main__':

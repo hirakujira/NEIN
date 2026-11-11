@@ -1,10 +1,8 @@
 # NEIN
 
-NEIN 在德文中就是「不／不要（No）」的意思。
+NEIN 在德文是「不」的意思：對 LINE 裡不想要的東西說「NEIN」。
 
-名字取自這個雙關：對 LINE 裡不想要的東西說「NEIN」。
-
-除了副裝置登入相容性與介面調整之外，NEIN 也可以停用已分析的廣告 loader、隱藏廣告檢視，並封鎖已核對的廣告網域。
+NEIN 會修改 LINE 的 IPA，讓 iPhone 以副裝置身分登入，並可選擇移除廣告、隱藏推廣分頁等。
 
 > NEIN to ads. NEIN to unnecessary clutter.<br>
 > LINE, aber ohne Werbung. NEIN.
@@ -12,99 +10,56 @@ NEIN 在德文中就是「不／不要（No）」的意思。
 
 ## 支援版本 📦
 
-| LINE 版本 | 安裝方式 | 注意 |
-|---|---|---|
-| 26.14.0 | 自己簽署 | 需要 iOS 18 以上，沒有推播通知（以下有解法） |
-| 26.15.1 | 自己簽署 | 同上 |
-| 26.17.0 | 自己簽署 | 同上 |
+LINE 26.14.0、26.15.1、26.17.0，需要 iOS 18 以上。只接受已核對的 IPA，其他版本會拒絕處理。
 
+macOS 版請看 [README-macOS.md](README-macOS.md)。
 
-## macOS 版本 的 NEIN
+## 使用方式 📖
 
-[macOS 說明文件](README-macOS.md)。
+1. 準備解密過的 LINE IPA（沒有越獄裝置的話，請自行在網路上搜尋）。
+2. 執行（推薦組合，開啟所有日常功能）：
 
-### 說明 📖
+   ```sh
+   python3 tools/main.py --keychain-compat --remove-ads --hide-promotional-tabs \
+     --collapse-friends-on-launch --enable-sticker-shop \
+     jp.naver.line_26.17.0.ipa \
+     output/NEIN-26.17.0.ipa
+   ```
 
-* NEIN 需要解密過的 LINE IPA，如果沒有越獄裝置可以自己進行 IPA 解密，則請自行在網路上搜尋現成的 IPA。
-* NEIN 會將主 App 名稱設為 `NEIN`、Bundle ID 設為 `kinta.ma.nein`，並預設使用香蕉圖示。
-* 為避免誤觸原版連結，輸出版本不註冊 URL scheme。
-* 完成後請使用自己的憑證和 provisioning profile 完整重簽名再安裝。修改版可正常收發訊息，但不支援推播通知。
-* 打包時會移除原版主 App 的 `_CodeSignature/`、App 與 Framework 的 `SC_Info/`、`META-INF/` 與 `iTunesMetadata.plist`，避免舊資源清單及 FairPlay 複製清單仍引用已移除的擴充套件；完整重簽時必須重新產生資源簽章。
-* 重簽可以使用 [AltStore](https://altstore.io/) 或 [Sideloadly](https://sideloadly.io/)。
+   使用 iPhone Duo 的話，再加上 `--iphone-duo`。
 
-預設使用副裝置模式（偽裝成 iPad 登入），建議使用副裝置先嘗試，以免影響帳號與內容，若要在主帳號嘗試，請務必先備份所有資料。
+3. 用自己的憑證完整重簽後安裝，例如 [AltStore](https://altstore.io/) 或 [Sideloadly](https://sideloadly.io/)。重簽時請保留 Bundle ID `kinta.ma.nein`。
 
-```sh
-python3 tools/main.py --keychain-compat --remove-ads --hide-promotional-tabs --collapse-friends-on-launch \
-  jp.naver.line_26.17.0.ipa \
-  output/NEIN-26.17.0-secondary.ipa
-```
+裝好的 App 叫 `NEIN`，可以和原版 LINE 並存。NEIN 收不到推播，建議保留原版 LINE 接收通知，平常用 NEIN。
 
-`--collapse-friends-on-launch` 讓首頁的好友區塊在建立時預設收合；進入 App
-後仍可用原本的區塊控制手動展開。
+預設以副裝置（偽裝成 iPad）登入。建議先用副裝置測試；若要用主帳號，請先備份所有資料。
 
-加上 `--enable-sticker-shop` 可實驗性開啟副裝置貼圖商店（預設關閉）。
-僅支援已核對 SHA-256 的 26.14.0、26.15.1、26.17.0 IPA，不可搭配 `--allow-unverified`。
+## 選項 ⚙️
 
-26.17.0 已確認可在原版 LINE 儲值後，到 NEIN 用既有代幣購買貼圖；
-NEIN 內不支援 IAP 儲值，付款與授權檢查不變。其他版本的購買流程尚未實測。
+| 選項 | 說明 |
+|---|---|
+| `--keychain-compat` | 處理重簽後部分 Keychain 存取失敗的問題，建議開啟。 |
+| `--remove-ads` | 停用廣告載入、隱藏廣告，並封鎖廣告網域（清單見 [`ad_domains.txt`](ad_domains.txt)）。 |
+| `--hide-promotional-tabs` | 隱藏 VOOM、新聞、購物與「逛逛」分頁，並在分頁列加上「設定」。也可以在 5 秒內連點「主頁」10 次開啟設定。 |
+| `--collapse-friends-on-launch` | 首頁的好友區塊預設收合，仍可手動展開。 |
+| `--enable-sticker-shop` | 實驗性開啟貼圖商店。可以用在原版 LINE 儲值的代幣購買（26.17.0 已實測），NEIN 內無法儲值。 |
+| `--iphone-duo` | 實驗性支援 iPhone Duo：填滿內外螢幕，展開時改用 iPad 版的左右雙欄版面。 |
+| `--primary-login` | 保留主手機的登入流程，不偽裝成 iPad。 |
 
-`--hide-promotional-tabs` 會隱藏 VOOM、新聞、購物與「逛逛」（Discover）分頁按鈕。
-NEIN 無法從原本的入口正常開啟設定，所以分頁列最後會另外加上「設定」分頁；
-也可以在 5 秒內連點「主頁」10 次開啟設定。
+廣告網域清單可以用 `python3 tools/scan_ad_domains.py <IPA> ad_domains.txt` 重新產生。
 
-`--remove-ads` 會停用已分析的廣告 loader、隱藏廣告檢視，並封鎖已核對的 LINE
-廣告、Google Ads/IMA 與 Taboola 網域。封鎖清單保存在
-[`ad_domains.txt`](ad_domains.txt)，可用以下指令從已核對的 IPA 重新產生：
+## 原理 🔧
 
-```sh
-python3 tools/scan_ad_domains.py jp.naver.line_26.15.1.ipa ad_domains.txt
-```
-
-加上 `--iphone-duo` 可實驗性讓 NEIN 在 iPhone Duo 上填滿外螢幕與展開後的內螢幕（預設關閉）。
-目前支援的 LINE 都以 iOS 26.5 SDK 建置，在 iPhone Duo 上會以縮小並加黑框的相容模式顯示；
-此選項把主執行檔 `LC_BUILD_VERSION` 的 SDK 欄位，以及 Info.plist 的 `DTSDKName`、
-`DTPlatformVersion` 改為 iOS 27.1，最低系統版本維持 iOS 18。
-
-```sh
-python3 tools/main.py --keychain-compat --remove-ads --hide-promotional-tabs --collapse-friends-on-launch \
-  --iphone-duo \
-  jp.naver.line_26.17.0.ipa \
-  output/NEIN-26.17.0-duo.ipa
-```
-
-相容層會停用 iOS 27.1 的直向工具列，讓分頁列維持在底部。此選項只負責填滿螢幕，
-是否顯示雙欄由 LINE 依 size class 決定。需要注入相容層，所以不能搭配 `--entry-only`。
-
-若要建立保留主手機登入流程的版本，加上 `--primary-login`：
-
-```sh
-python3 tools/main.py --keychain-compat --remove-ads --hide-promotional-tabs \
-  --primary-login \
-  jp.naver.line_26.17.0.ipa \
-  output/NEIN-26.17.0-primary.ipa
-```
-
-## 建議做法 📱
-
-1. 依照上方步驟建立副裝置版本的 IPA。
-2. 工具會預設使用 `kinta.ma.nein` 作為 Bundle ID；重簽時請保留此設定。
-3. 將修改版安裝到裝置後，即可與原版 LINE 並存。
-4. 保留原版 LINE 可用於接收通知，修改版則用於日常操作，享受順暢的 App 體驗。
-
-## 原理 ⚙️
-
-- LINE 會檢查裝置是否為 iPhone，本工具修改登入入口的條件跳轉為 iPad，不會全域偽裝裝置。
-- 注入相容層，在 App Group 無法使用時改用 App 私有目錄，並處理部分 Keychain 不相容問題。
-- 修改後需以自己的憑證和 provisioning profile 完整重簽。
+- 只修改登入入口的裝置判斷，讓 LINE 以為是 iPad，不會全域偽裝裝置。
+- 注入相容層，處理重簽後 App Group 與 Keychain 無法使用的問題。
 
 ## 注意 ⚠️
 
-- 不支援推播通知功能
+- 不支援推播通知。
 - 不包含原版的分享、Widget、Siri 與 Apple Watch 擴充功能。
-- `--remove-ads` 可能使 LINE News、推薦內容或嵌入式廣告影片無法載入。
-- `--iphone-duo` 會讓所有 iOS 27 iPhone 套用 iOS 27.1 SDK 的 UIKit 行為（例如 UIView 預設邊距變為 0），不只 iPhone Duo；LINE 在 iPhone Duo 上的版面、旋轉與鍵盤仍需實機測試。
-- 只支援已核對的版本和 IPA，其他版本會拒絕處理。
+- NEIN 不接收 LINE 連結，連結會由原版 LINE 開啟。
+- `--remove-ads` 可能讓 LINE News、推薦內容或廣告影片無法載入。
+- `--iphone-duo` 尚未經過實機測試；裝在其他 iOS 27 iPhone 上也會有些微版面差異（例如預設邊距變為 0）。
 - 請先備份 LINE 資料，再於測試裝置安裝。
 
 ## 免責聲明 📄

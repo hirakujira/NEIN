@@ -47,6 +47,9 @@ PATCH_PROFILE_DIR = ROOT / 'patch_profiles'
 LC_BUILD_VERSION = 0x32
 PLATFORM_IOS = 2
 IPHONE_DUO_SDK = (27, 1, 0)
+# hooks/NEINDuoSplitLayout.h enforces the same models and threshold (points).
+IPHONE_DUO_MODELS = ('iPhone19,4',)
+IPHONE_DUO_SPLIT_MINIMUM_SIDE = 600
 
 @dataclass(frozen=True)
 class PatchProfile:
@@ -526,7 +529,7 @@ def parse_args(argv=None):
     parser.add_argument('--enable-sticker-shop', action='store_true',
                         help='Experimentally enable audited sticker-shop routes and coin entry; normal billing and authorization still apply')
     parser.add_argument('--iphone-duo', action='store_true',
-                        help='Experimentally mark the app as built with the iOS 27.1 SDK so iPhone Duo uses the full inner display; keeps bars horizontal')
+                        help="Experimentally mark the app as built with the iOS 27.1 SDK so iPhone Duo uses the full inner display; keeps bars horizontal and shows LINE's two-column layout on the inner display")
     parser.add_argument('--allow-unverified', action='store_true',
                         help='Allow a different executable hash for a known version/build; still checks the original ARM64 instruction')
     args = parser.parse_args(argv)
@@ -770,15 +773,39 @@ def main():
                 '-[UIViewController preferredVerticalBarBehavior] returns '
                 'UIVerticalBarBehaviorDisabled on iOS 27.1 and later.'
             ),
+            'split_layout': {
+                'mode': 'ipad_style_two_columns_on_iphone_duo_inner_display',
+                'device_models': list(IPHONE_DUO_MODELS),
+                'minimum_window_short_side_points': IPHONE_DUO_SPLIT_MINIMUM_SIDE,
+                'simulator_window_points': {'folded': '466x678', 'unfolded': '951x669'},
+                'hook': (
+                    '-[LINE.NLSplitViewController viewDidLayoutSubviews] sets the split '
+                    "controller's own traitOverrides.horizontalSizeClass to regular while the "
+                    'window\'s shorter side is at least %dpt and removes that override otherwise. '
+                    "LINE's MainRootViewController compact override is left unchanged."
+                    % IPHONE_DUO_SPLIT_MINIMUM_SIDE
+                ),
+                'columns': (
+                    "LINE's NLSplitViewController already sets preferredDisplayMode "
+                    'oneBesideSecondary and a 320pt minimum primary column width; unchanged.'
+                ),
+                'install_guard': (
+                    'Installs only when uname machine is %s and LINE.NLSplitViewController '
+                    'defines viewDidLayoutSubviews with the expected signature; otherwise LINE '
+                    'keeps one column.' % ' or '.join(IPHONE_DUO_MODELS)
+                ),
+            },
             'scope': (
                 'Every iOS 27 device applies iOS 27.1 SDK UIKit behavior to this build, '
                 'not only iPhone Duo (for example zero default UIView layout margins). '
-                'Two-column layouts remain LINE size-class decisions.'
+                'The two-column layout is limited to iPhone Duo on its unfolded inner display.'
             ),
             'verification': (
                 'Only the LC_BUILD_VERSION SDK field and Info.plist SDK keys changed; '
-                'minimum OS unchanged. LINE layout, rotation, keyboard and lifecycle '
-                'behavior on iPhone Duo require real-device testing.'
+                'minimum OS unchanged. The split layout hook was checked with UIKit test '
+                'doubles and with a LINE-structured test app on the iOS 27.2 iPhone Duo '
+                'simulator (fold, unfold, cold launch). LINE layout, chat transfer on fold, '
+                'rotation, keyboard and lifecycle behavior on iPhone Duo require real-device testing.'
             ),
         }
     if args.remove_ads or args.hide_promotional_tabs:
