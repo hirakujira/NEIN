@@ -762,7 +762,7 @@ def main():
         }
     if args.iphone_duo:
         manifest['iphone_duo'] = {
-            'status': 'experimental_requires_real_device_testing',
+            'status': 'experimental',
             'build_version': sdk_patch,
             'info_plist': {
                 key: {'original': info.get(key), 'patched': value}
@@ -804,8 +804,8 @@ def main():
                 'Only the LC_BUILD_VERSION SDK field and Info.plist SDK keys changed; '
                 'minimum OS unchanged. The split layout hook was checked with UIKit test '
                 'doubles and with a LINE-structured test app on the iOS 27.2 iPhone Duo '
-                'simulator (fold, unfold, cold launch). LINE layout, chat transfer on fold, '
-                'rotation, keyboard and lifecycle behavior on iPhone Duo require real-device testing.'
+                'simulator (fold, unfold, cold launch). User-reported real-device testing on '
+                'iPhone Duo passed.'
             ),
         }
     if args.remove_ads or args.hide_promotional_tabs:

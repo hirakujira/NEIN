@@ -43,7 +43,7 @@ macOS 版請看 [README-macOS.md](README-macOS.md)。
 | `--hide-promotional-tabs` | 隱藏 VOOM、新聞、購物與「逛逛」分頁，並在分頁列加上「設定」。也可以在 5 秒內連點「主頁」10 次開啟設定。 |
 | `--collapse-friends-on-launch` | 首頁的好友區塊預設收合，仍可手動展開。 |
 | `--enable-sticker-shop` | 實驗性開啟貼圖商店。可以用在原版 LINE 儲值的代幣購買（26.17.0 已實測），NEIN 內無法儲值。 |
-| `--iphone-duo` | 實驗性支援 iPhone Duo：填滿內外螢幕，展開時改用 iPad 版的左右雙欄版面。 |
+| `--iphone-duo` | 實驗性支援 iPhone Duo：填滿內外螢幕，展開時改用 iPad 版的左右雙欄版面（已實機測試）。 |
 | `--primary-login` | 保留主手機的登入流程，不偽裝成 iPad。 |
 
 廣告網域清單可以用 `python3 tools/scan_ad_domains.py <IPA> ad_domains.txt` 重新產生。
@@ -59,7 +59,7 @@ macOS 版請看 [README-macOS.md](README-macOS.md)。
 - 不包含原版的分享、Widget、Siri 與 Apple Watch 擴充功能。
 - NEIN 不接收 LINE 連結，連結會由原版 LINE 開啟。
 - `--remove-ads` 可能讓 LINE News、推薦內容或廣告影片無法載入。
-- `--iphone-duo` 尚未經過實機測試；裝在其他 iOS 27 iPhone 上也會有些微版面差異（例如預設邊距變為 0）。
+- `--iphone-duo` 的版本裝在其他 iOS 27 iPhone 上，也會有些微版面差異（例如預設邊距變為 0）。
 - 請先備份 LINE 資料，再於測試裝置安裝。
 
 ## 免責聲明 📄
