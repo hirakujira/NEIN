@@ -44,6 +44,9 @@ DEFAULT_APP_NAME = 'NEIN'
 DEFAULT_ICON = 'design_simple_banana'
 AD_DOMAIN_LIST = ROOT / 'ad_domains.txt'
 PATCH_PROFILE_DIR = ROOT / 'patch_profiles'
+LC_BUILD_VERSION = 0x32
+PLATFORM_IOS = 2
+IPHONE_DUO_SDK = (27, 1, 0)
 
 @dataclass(frozen=True)
 class PatchProfile:
@@ -180,7 +183,18 @@ def collect_icon_preview_assets(output_path, icon_names):
     return files
 
 
-def patched_info_plist(info, enable_icon_picker=False):
+def iphone_duo_info_plist_changes(info):
+    try:
+        version = tuple(int(part) for part in str(info.get('DTPlatformVersion')).split('.'))
+    except ValueError:
+        version = ()
+    if version >= IPHONE_DUO_SDK[:2]:
+        return {}
+    return {'DTSDKName': 'iphoneos%d.%d' % IPHONE_DUO_SDK[:2],
+            'DTPlatformVersion': '%d.%d' % IPHONE_DUO_SDK[:2]}
+
+
+def patched_info_plist(info, enable_icon_picker=False, iphone_duo=False):
     result = dict(info)
     result['CFBundleIdentifier'] = DEFAULT_BUNDLE_ID
     result['CFBundleDisplayName'] = DEFAULT_APP_NAME
@@ -218,6 +232,8 @@ def patched_info_plist(info, enable_icon_picker=False):
             'AllowedIconNames': icon_names,
             'PreviewManifest': ICON_PREVIEW_MANIFEST,
         }
+    if iphone_duo:
+        result.update(iphone_duo_info_plist_changes(info))
     return plistlib.dumps(result, fmt=plistlib.FMT_XML, sort_keys=False)
 
 
@@ -440,6 +456,49 @@ def add_dylib(data):
     return bytes(result), {'load_command_offset': hex(cursor), 'load_command_size': size,
                            'path': LOAD_PATH, 'first_section_offset': hex(first_section)}
 
+
+def macho_version(value):
+    return f'{value >> 16}.{(value >> 8) & 0xff}.{value & 0xff}'
+
+
+def patch_build_version_sdk(data):
+    if struct.unpack_from('<I', data, 0)[0] != 0xfeedfacf:
+        raise ValueError('Expected thin 64-bit Mach-O')
+    count, command_size = struct.unpack_from('<II', data, 16)
+    cursor = 32
+    build_versions = []
+    for _ in range(count):
+        cmd, size = struct.unpack_from('<II', data, cursor)
+        if size < 8 or size % 8 or cursor + size > 32 + command_size:
+            raise ValueError('Invalid load-command layout')
+        if cmd == LC_BUILD_VERSION:
+            if size < 24:
+                raise ValueError('Truncated LC_BUILD_VERSION load command')
+            build_versions.append(cursor)
+        cursor += size
+    if cursor != 32 + command_size:
+        raise ValueError('Load command size mismatch')
+    if len(build_versions) != 1:
+        raise ValueError('Expected exactly one LC_BUILD_VERSION load command.')
+    offset = build_versions[0]
+    platform, minos, sdk = struct.unpack_from('<3I', data, offset + 8)
+    if platform != PLATFORM_IOS:
+        raise ValueError('LC_BUILD_VERSION platform is not iOS.')
+    major, minor, patch = IPHONE_DUO_SDK
+    target = (major << 16) | (minor << 8) | patch
+    result = bytearray(data)
+    if sdk < target:
+        struct.pack_into('<I', result, offset + 16, target)
+    return bytes(result), {
+        'load_command_offset': hex(offset),
+        'sdk_field_offset': hex(offset + 16),
+        'minimum_os': macho_version(minos),
+        'original_sdk': macho_version(sdk),
+        'patched_sdk': macho_version(max(sdk, target)),
+        'changed': sdk < target,
+    }
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('input', type=Path, help='Original verified IPA, not a previously patched IPA')
@@ -466,6 +525,8 @@ def parse_args(argv=None):
                         help='Initialize the Friends section as collapsed')
     parser.add_argument('--enable-sticker-shop', action='store_true',
                         help='Experimentally enable audited sticker-shop routes and coin entry; normal billing and authorization still apply')
+    parser.add_argument('--iphone-duo', action='store_true',
+                        help='Experimentally mark the app as built with the iOS 27.1 SDK so iPhone Duo uses the full inner display; keeps bars horizontal')
     parser.add_argument('--allow-unverified', action='store_true',
                         help='Allow a different executable hash for a known version/build; still checks the original ARM64 instruction')
     args = parser.parse_args(argv)
@@ -484,6 +545,8 @@ def parse_args(argv=None):
         parser.error('--entry-only cannot be combined with diagnostics, compatibility hooks, or ad removal.')
     if args.entry_only and args.primary_login:
         parser.error('--entry-only cannot be combined with --primary-login.')
+    if args.entry_only and args.iphone_duo:
+        parser.error('--entry-only cannot be combined with --iphone-duo.')
     if (args.output.exists() or args.output.with_suffix('.manifest.json').exists() or
             args.output.resolve() == args.input.resolve()):
         parser.error('Output and manifest must be new files distinct from the input.')
@@ -507,7 +570,9 @@ def main():
                 raise ValueError('No audited sticker-shop patch is available for this IPA.')
             if digest(original) != profile.executable_sha256:
                 raise ValueError('Sticker-shop patch requires an exact executable SHA-256 match.')
-    output_info = patched_info_plist(info, enable_icon_picker=not args.entry_only)
+    output_info = patched_info_plist(
+        info, enable_icon_picker=not args.entry_only, iphone_duo=args.iphone_duo,
+    )
     icon_preview_files = (
         {} if args.entry_only else
         extract_icon_previews(args.input, app_icon_names(info)[1])
@@ -536,6 +601,9 @@ def main():
             )
         if args.enable_sticker_shop:
             modified = patch_sticker_shop(modified, profile.sticker_shop)
+        modified, sdk_patch = (
+            patch_build_version_sdk(modified) if args.iphone_duo else (modified, None)
+        )
         with zipfile.ZipFile(args.output, 'x') as target:
             target.comment = source.comment
             for entry in source.infolist():
@@ -609,6 +677,11 @@ def main():
         ):
             offset = int(patch['file_offset'], 16)
             optional_patch_ranges.append((offset, offset + len(bytes.fromhex(patch['original_hex']))))
+    if sdk_patch is not None:
+        sdk_offset = int(sdk_patch['sdk_field_offset'], 16)
+        if macho_version(struct.unpack_from('<I', modified, sdk_offset)[0]) != sdk_patch['patched_sdk']:
+            raise AssertionError('LC_BUILD_VERSION SDK differs from the iPhone Duo mode.')
+        optional_patch_ranges.append((sdk_offset, sdk_offset + 4))
     if len(modified) != len(original) or any(
             a != b and not (
                 (injection is not None and (16 <= i < 24 or start <= i < end)) or
@@ -648,6 +721,7 @@ def main():
                 'collapse_friends_on_launch': args.collapse_friends_on_launch,
                 'enable_sticker_shop': args.enable_sticker_shop,
                 'tab_diagnostics': args.tab_diagnostics,
+                'iphone_duo': None,
                 'source_ipa_sha256': digest_file(args.input),
                 'output_ipa_sha256': digest_file(args.output),
                 'source_executable_sha256': digest(original), 'patched_executable_sha256': digest(modified),
@@ -682,6 +756,30 @@ def main():
             **profile.sticker_shop,
             'scope': 'Sticker availability, LIFF/native sticker routes and their shared coin entry checks only; global feature 3, theme/emoji/account guards, login identity, balance, billing, receipts, ownership and server authorization unchanged.',
             'verification': 'Static dispatch, LIFF/native/coin entry and archive checks only for this build; no IAP support added. User-reported 26.17.0 sticker purchases use coins charged in original LINE; other versions still require real-device verification.',
+        }
+    if args.iphone_duo:
+        manifest['iphone_duo'] = {
+            'status': 'experimental_requires_real_device_testing',
+            'build_version': sdk_patch,
+            'info_plist': {
+                key: {'original': info.get(key), 'patched': value}
+                for key, value in iphone_duo_info_plist_changes(info).items()
+            },
+            'vertical_bar': 'disabled',
+            'vertical_bar_hook': (
+                '-[UIViewController preferredVerticalBarBehavior] returns '
+                'UIVerticalBarBehaviorDisabled on iOS 27.1 and later.'
+            ),
+            'scope': (
+                'Every iOS 27 device applies iOS 27.1 SDK UIKit behavior to this build, '
+                'not only iPhone Duo (for example zero default UIView layout margins). '
+                'Two-column layouts remain LINE size-class decisions.'
+            ),
+            'verification': (
+                'Only the LC_BUILD_VERSION SDK field and Info.plist SDK keys changed; '
+                'minimum OS unchanged. LINE layout, rotation, keyboard and lifecycle '
+                'behavior on iPhone Duo require real-device testing.'
+            ),
         }
     if args.remove_ads or args.hide_promotional_tabs:
         manifest['ad_removal'] = {
@@ -787,6 +885,8 @@ def build_compat_dylib(args, info, original, patch_profile):
         build_labels.append('no-promotional-tabs')
     if args.tab_diagnostics:
         build_labels.append('tab-diagnostics')
+    if args.iphone_duo:
+        build_labels.append('iphone-duo')
     if args.primary_login:
         build_labels.append('primary-login')
     if build_labels:
@@ -815,6 +915,8 @@ def build_compat_dylib(args, info, original, patch_profile):
                       if args.hide_promotional_tabs else []),
                     *(['-DNEIN_MULTI_TAB_DIAGNOSTICS=1']
                       if args.tab_diagnostics else []),
+                    *(['-DNEIN_MULTI_IPHONE_DUO=1']
+                      if args.iphone_duo else []),
                     '-DNEIN_MULTI_ICON_PICKER=1',
                     '-dynamiclib', '-framework', 'Foundation',
                     '-framework', 'UIKit', '-framework', 'CoreGraphics',

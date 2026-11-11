@@ -61,6 +61,21 @@ NEIN 無法從原本的入口正常開啟設定，所以分頁列最後會另外
 python3 tools/scan_ad_domains.py jp.naver.line_26.15.1.ipa ad_domains.txt
 ```
 
+加上 `--iphone-duo` 可實驗性讓 NEIN 在 iPhone Duo 上填滿外螢幕與展開後的內螢幕（預設關閉）。
+目前支援的 LINE 都以 iOS 26.5 SDK 建置，在 iPhone Duo 上會以縮小並加黑框的相容模式顯示；
+此選項把主執行檔 `LC_BUILD_VERSION` 的 SDK 欄位，以及 Info.plist 的 `DTSDKName`、
+`DTPlatformVersion` 改為 iOS 27.1，最低系統版本維持 iOS 18。
+
+```sh
+python3 tools/main.py --keychain-compat --remove-ads --hide-promotional-tabs --collapse-friends-on-launch \
+  --iphone-duo \
+  jp.naver.line_26.17.0.ipa \
+  output/NEIN-26.17.0-duo.ipa
+```
+
+相容層會停用 iOS 27.1 的直向工具列，讓分頁列維持在底部。此選項只負責填滿螢幕，
+是否顯示雙欄由 LINE 依 size class 決定。需要注入相容層，所以不能搭配 `--entry-only`。
+
 若要建立保留主手機登入流程的版本，加上 `--primary-login`：
 
 ```sh
@@ -88,6 +103,7 @@ python3 tools/main.py --keychain-compat --remove-ads --hide-promotional-tabs \
 - 不支援推播通知功能
 - 不包含原版的分享、Widget、Siri 與 Apple Watch 擴充功能。
 - `--remove-ads` 可能使 LINE News、推薦內容或嵌入式廣告影片無法載入。
+- `--iphone-duo` 會讓所有 iOS 27 iPhone 套用 iOS 27.1 SDK 的 UIKit 行為（例如 UIView 預設邊距變為 0），不只 iPhone Duo；LINE 在 iPhone Duo 上的版面、旋轉與鍵盤仍需實機測試。
 - 只支援已核對的版本和 IPA，其他版本會拒絕處理。
 - 請先備份 LINE 資料，再於測試裝置安裝。
 

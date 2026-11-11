@@ -22,6 +22,9 @@
 #ifdef NEIN_MULTI_REMOVE_ADS
 #include "NEINAdNetworkHooks.m"
 #endif
+#ifdef NEIN_MULTI_IPHONE_DUO
+#include "NEINIPhoneDuo.m"
+#endif
 
 typedef NSURL *(*NEINContainerIMP)(id, SEL, NSString *);
 static NEINContainerIMP NEINOriginalContainer;
@@ -130,6 +133,9 @@ __attribute__((constructor)) static void NEINHooksLoad(void) {
 #endif
 #ifdef NEIN_MULTI_REMOVE_ADS
             NEINInstallAdNetworkBlock();
+#endif
+#ifdef NEIN_MULTI_IPHONE_DUO
+            NEINInstallIPhoneDuoCompat();
 #endif
         }
     }

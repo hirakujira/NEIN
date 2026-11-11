@@ -44,6 +44,25 @@ class IconPickerCompileTests(unittest.TestCase):
                 str(ROOT / 'hooks' / 'NEINHooks.m'),
             ], check=True)
 
+    def test_iphone_duo_hook_compiles_for_ios(self):
+        sdk = subprocess.check_output(
+            ['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True,
+        ).strip()
+        for flags in (
+            ['-DNEIN_MULTI_IPHONE_DUO=1'],
+            ['-DNEIN_MULTI_IPHONE_DUO=1', '-DNEIN_MULTI_HIDE_PROMOTIONAL_TABS=1',
+             '-DNEIN_MULTI_ICON_PICKER=1'],
+        ):
+            with self.subTest(flags=flags):
+                subprocess.run([
+                    'xcrun', '--sdk', 'iphoneos', 'clang',
+                    '-target', 'arm64-apple-ios18.0',
+                    '-isysroot', sdk,
+                    '-fobjc-arc', '-fblocks', '-fsyntax-only',
+                    *flags,
+                    str(ROOT / 'hooks' / 'NEINHooks.m'),
+                ], check=True)
+
 
 if __name__ == '__main__':
     unittest.main()

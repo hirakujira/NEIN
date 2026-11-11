@@ -99,6 +99,29 @@ class MainToolTests(unittest.TestCase):
             'keychain': {'profile_type': 'line_keychain'},
         }
 
+    def build_version_binary(self, sdk=0x1A0500, platform=main.PLATFORM_IOS,
+                             build_versions=1):
+        text_offset = 0x400
+        binary = bytearray(text_offset + 16)
+        struct.pack_into(
+            '<6I', binary, 0, 0xFEEDFACF, 0x0100000C, 0, 2,
+            1 + build_versions, 152 + 24 * build_versions,
+        )
+        struct.pack_into('<II', binary, 32, 0x19, 152)
+        binary[40:46] = b'__TEXT'
+        struct.pack_into('<QQQQ', binary, 56, 0x100000000, 0x2000, 0, len(binary))
+        struct.pack_into('<IIII', binary, 88, 7, 5, 1, 0)
+        binary[104:110] = b'__text'
+        binary[120:126] = b'__TEXT'
+        struct.pack_into('<QQI', binary, 136, 0x100000400, 16, text_offset)
+        for index in range(build_versions):
+            struct.pack_into(
+                '<6I', binary, 184 + 24 * index, main.LC_BUILD_VERSION, 24,
+                platform, 0x120000, sdk, 0,
+            )
+        binary[text_offset:text_offset + 4] = bytes.fromhex('40000036')
+        return bytes(binary)
+
     def test_entry_patch_requires_expected_instruction(self):
         profile = main.PatchProfile(
             '26.14.0', 'test', '0' * 64, 248, 0x100001030,
@@ -725,6 +748,131 @@ class MainToolTests(unittest.TestCase):
                 main.parse_args([
                     str(source), str(output), '--entry-only', '--remove-ads',
                 ])
+
+    def test_iphone_duo_sdk_patch_changes_only_sdk_field(self):
+        original = self.build_version_binary()
+        patched, result = main.patch_build_version_sdk(original)
+        self.assertEqual(
+            [i for i, (a, b) in enumerate(zip(original, patched)) if a != b],
+            [0xc9, 0xca],
+        )
+        self.assertEqual(len(patched), len(original))
+        self.assertEqual(struct.unpack_from('<I', patched, 0xc8)[0], 0x1B0100)
+        self.assertEqual(result, {
+            'load_command_offset': '0xb8',
+            'sdk_field_offset': '0xc8',
+            'minimum_os': '18.0.0',
+            'original_sdk': '26.5.0',
+            'patched_sdk': '27.1.0',
+            'changed': True,
+        })
+
+    def test_iphone_duo_sdk_patch_keeps_newer_sdk(self):
+        original = self.build_version_binary(sdk=0x1B0200)
+        patched, result = main.patch_build_version_sdk(original)
+        self.assertEqual(patched, original)
+        self.assertFalse(result['changed'])
+        self.assertEqual(result['patched_sdk'], '27.2.0')
+
+    def test_iphone_duo_sdk_patch_rejects_unexpected_build_version(self):
+        fat = bytearray(self.build_version_binary())
+        struct.pack_into('<I', fat, 0, 0xCAFEBABE)
+        truncated = bytearray(self.build_version_binary())
+        struct.pack_into('<I', truncated, 188, 16)
+        for name, binary, message in (
+            ('fat', bytes(fat), 'thin 64-bit'),
+            ('missing', self.build_version_binary(build_versions=0), 'exactly one'),
+            ('duplicate', self.build_version_binary(build_versions=2), 'exactly one'),
+            ('mac catalyst', self.build_version_binary(platform=6), 'not iOS'),
+            ('truncated', bytes(truncated), 'Truncated|layout|mismatch'),
+        ):
+            with self.subTest(name), self.assertRaisesRegex(ValueError, message):
+                main.patch_build_version_sdk(binary)
+
+    def test_iphone_duo_plist_marks_ios_27_1_sdk(self):
+        source = {
+            **self.sample_info(), 'MinimumOSVersion': '18.0',
+            'DTSDKName': 'iphoneos26.5', 'DTPlatformVersion': '26.5',
+            'DTXcode': '2650',
+        }
+        default = plistlib.loads(main.patched_info_plist(source))
+        self.assertEqual(default['DTSDKName'], 'iphoneos26.5')
+        self.assertEqual(default['DTPlatformVersion'], '26.5')
+        duo = plistlib.loads(main.patched_info_plist(source, iphone_duo=True))
+        self.assertEqual(duo['DTSDKName'], 'iphoneos27.1')
+        self.assertEqual(duo['DTPlatformVersion'], '27.1')
+        self.assertEqual(duo['DTXcode'], '2650')
+        self.assertEqual(duo['MinimumOSVersion'], '18.0')
+        self.assertEqual(source['DTSDKName'], 'iphoneos26.5')
+        newer = {**source, 'DTSDKName': 'iphoneos27.2', 'DTPlatformVersion': '27.2'}
+        self.assertEqual(main.iphone_duo_info_plist_changes(newer), {})
+
+    def test_iphone_duo_option_is_opt_in_and_rejects_entry_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [str(Path(directory) / 'input.ipa'),
+                     str(Path(directory) / 'output.ipa')]
+            self.assertFalse(main.parse_args(paths).iphone_duo)
+            self.assertTrue(main.parse_args(paths + ['--iphone-duo']).iphone_duo)
+            with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+                main.parse_args(paths + ['--iphone-duo', '--entry-only'])
+
+    def test_iphone_duo_build_patches_sdk_and_records_manifest(self):
+        info = {
+            **self.sample_info(), 'MinimumOSVersion': '18.0',
+            'DTSDKName': 'iphoneos26.5', 'DTPlatformVersion': '26.5',
+        }
+        original = self.build_version_binary()
+        profile = main.PatchProfile(
+            '26.14.0', 'test', main.digest(original), 0x400, 0x100000400,
+            bytes.fromhex('40000036'), 'tbz w0, #0, 0x100000408',
+        )
+        for iphone_duo in (False, True):
+            with self.subTest(iphone_duo=iphone_duo), \
+                    tempfile.TemporaryDirectory() as directory:
+                source, output = Path(directory) / 'input.ipa', Path(directory) / 'output.ipa'
+                with zipfile.ZipFile(source, 'w') as archive:
+                    archive.writestr(main.EXECUTABLE, original)
+                    archive.writestr(main.PLIST, plistlib.dumps(info))
+                args = main.parse_args(
+                    [str(source), str(output)] + (['--iphone-duo'] if iphone_duo else []),
+                )
+                with mock.patch.object(main, 'parse_args', return_value=args), \
+                        mock.patch.object(main, 'select_profile', return_value=(profile, None)), \
+                        mock.patch.object(main, 'extract_icon_previews', return_value={}), \
+                        mock.patch.object(main, 'build_compat_dylib',
+                                          return_value=(None, b'dylib')) as build, \
+                        mock.patch('sys.stdout', new_callable=StringIO):
+                    main.main()
+                self.assertEqual(build.call_args.args[0].iphone_duo, iphone_duo)
+                expected, _ = main.add_dylib(main.patched_binary(original, profile))
+                if iphone_duo:
+                    expected, _ = main.patch_build_version_sdk(expected)
+                with zipfile.ZipFile(output) as archive:
+                    executable = archive.read(main.EXECUTABLE)
+                    output_info = plistlib.loads(archive.read(main.PLIST))
+                self.assertEqual(executable, expected)
+                self.assertEqual(
+                    struct.unpack_from('<I', executable, 0xc8)[0],
+                    0x1B0100 if iphone_duo else 0x1A0500,
+                )
+                self.assertEqual(struct.unpack_from('<I', executable, 0xc4)[0], 0x120000)
+                self.assertEqual(output_info['DTSDKName'],
+                                 'iphoneos27.1' if iphone_duo else 'iphoneos26.5')
+                manifest = json.loads(output.with_suffix('.manifest.json').read_text())
+                if not iphone_duo:
+                    self.assertIsNone(manifest['iphone_duo'])
+                    continue
+                section = manifest['iphone_duo']
+                self.assertEqual(section['build_version']['sdk_field_offset'], '0xc8')
+                self.assertEqual(section['build_version']['original_sdk'], '26.5.0')
+                self.assertEqual(section['build_version']['patched_sdk'], '27.1.0')
+                self.assertEqual(section['build_version']['minimum_os'], '18.0.0')
+                self.assertEqual(section['info_plist'], {
+                    'DTSDKName': {'original': 'iphoneos26.5', 'patched': 'iphoneos27.1'},
+                    'DTPlatformVersion': {'original': '26.5', 'patched': '27.1'},
+                })
+                self.assertEqual(section['vertical_bar'], 'disabled')
+                self.assertIn('real-device', section['verification'])
 
 
 if __name__ == '__main__':
