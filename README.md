@@ -21,7 +21,7 @@ macOS 版請看 [README-macOS.md](README-macOS.md)。
 
    ```sh
    python3 tools/main.py --keychain-compat --remove-ads --hide-promotional-tabs \
-     --collapse-friends-on-launch --enable-sticker-shop \
+     --collapse-friends-on-launch \
      jp.naver.line_26.17.0.ipa \
      output/NEIN-26.17.0.ipa
    ```
@@ -42,10 +42,10 @@ macOS 版請看 [README-macOS.md](README-macOS.md)。
 | `--remove-ads` | 停用廣告載入、隱藏廣告，並封鎖廣告網域（清單見 [`ad_domains.txt`](ad_domains.txt)）。 |
 | `--hide-promotional-tabs` | 隱藏 VOOM、新聞、購物與「逛逛」分頁，並在分頁列加上「設定」。也可以在 5 秒內連點「主頁」10 次開啟設定。 |
 | `--collapse-friends-on-launch` | 首頁的好友區塊預設收合，仍可手動展開。 |
-| `--enable-sticker-shop` | 實驗性開啟貼圖商店。可以用在原版 LINE 儲值的代幣購買（26.17.0 已實測），NEIN 內無法儲值。 |
-| `--enable-theme-shop` | 實驗性開啟主題小舖，會一併套用 `--enable-sticker-shop`。26.17.0 已實測可開啟瀏覽，免費主題能下載並套用；付費主題購買未測。 |
 | `--iphone-duo` | 實驗性支援 iPhone Duo：填滿內外螢幕，展開時改用 iPad 版的左右雙欄版面（已實機測試）。 |
 | `--primary-login` | 保留主手機的登入流程，不偽裝成 iPad。 |
+
+貼圖商店與主題小舖預設開啟，不用加參數：貼圖可以用在原版 LINE 儲值的代幣購買（26.17.0 已實測），主題小舖已實測可開啟瀏覽、免費主題能下載並套用（付費主題購買未測），兩者在 NEIN 內都無法儲值。若某個 IPA 推不出已稽核的小舖 patch，建置會自動略過並記在 manifest 的 `shops_skipped`。
 
 廣告網域清單可以用 `python3 tools/scan_ad_domains.py <IPA> ad_domains.txt` 重新產生。
 

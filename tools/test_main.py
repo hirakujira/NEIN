@@ -171,6 +171,9 @@ class MainToolTests(unittest.TestCase):
         self.assertEqual(manifest['changed_byte_offsets'], ['0xf8', '0xf9', '0xfa', '0xfb'])
         self.assertFalse(manifest['enable_sticker_shop'])
         self.assertNotIn('sticker_shop', manifest)
+        self.assertEqual(manifest['shops_skipped'],
+                         'No audited sticker-shop patch for this build; '
+                         'sticker and theme shop patches skipped.')
         self.assertTrue(manifest['source_signing_and_store_metadata_removed'])
 
     def test_entry_only_sticker_shop_and_friends_round_trip(self):
@@ -196,7 +199,7 @@ class MainToolTests(unittest.TestCase):
         original = bytes(original)
         profile = self.profile(original, home_friends=friends, sticker_shop=sticker_shop)
         self.write_ipa(original, self.sample_info(), [('Payload/LINE.app/untouched', b'unchanged')])
-        args = self.args('--entry-only', '--enable-sticker-shop', '--collapse-friends-on-launch')
+        args = self.args('--entry-only', '--collapse-friends-on-launch')
         manifest = self.run_main(args, profile)
         expected = bytearray(main.patched_binary(original, profile))
         for item in sites:
@@ -207,6 +210,9 @@ class MainToolTests(unittest.TestCase):
             self.assertEqual(archive.read(main.EXECUTABLE), bytes(expected))
             self.assertEqual(archive.read('Payload/LINE.app/untouched'), b'unchanged')
         self.assertTrue(manifest['enable_sticker_shop'])
+        self.assertFalse(manifest['enable_theme_shop'])
+        self.assertEqual(manifest['shops_skipped'],
+                         'No audited theme-shop patch for this build; theme shop patch skipped.')
         self.assertEqual(manifest['home_friends'], friends)
         self.assertEqual(manifest['sticker_shop']['native_routes'], sticker_shop['native_routes'])
         for offset in ('0x140', '0x180', '0x188', '0x190', '0x194', '0x198', '0x19c'):
@@ -236,8 +242,7 @@ class MainToolTests(unittest.TestCase):
         original = bytes(original)
         profile = self.profile(original, sticker_shop=sticker_shop, theme_shop=theme_shop)
         self.write_ipa(original, self.sample_info())
-        args = self.args('--entry-only', '--enable-theme-shop')
-        self.assertTrue(args.enable_sticker_shop)
+        args = self.args('--entry-only')
         manifest = self.run_main(args, profile)
         expected = bytearray(main.patched_binary(original, profile))
         for item in (sticker_shop, sticker_shop['liff_route'],
@@ -250,32 +255,34 @@ class MainToolTests(unittest.TestCase):
             self.assertEqual(archive.read(main.EXECUTABLE), bytes(expected))
         self.assertTrue(manifest['enable_theme_shop'])
         self.assertTrue(manifest['enable_sticker_shop'])
+        self.assertNotIn('shops_skipped', manifest)
         self.assertEqual(manifest['theme_shop']['liff_route'], theme_shop['liff_route'])
         self.assertEqual(manifest['theme_shop']['code_cave'], theme_shop['code_cave'])
         for offset in ('0x140', '0x14b', '0x1a0', '0x1a4'):
             self.assertIn(offset, manifest['changed_byte_offsets'])
 
-    def test_theme_shop_refuses_missing_profile_section_before_writing(self):
+    def test_unverified_executable_skips_both_shops(self):
         original = sample_macho()
         self.write_ipa(original, self.sample_info())
-        profile = self.profile(original, sticker_shop={'native_routes': {}}, theme_shop=None)
-        args = self.args('--entry-only', '--enable-theme-shop')
-        with self.assertRaisesRegex(ValueError, 'theme-shop patch'):
-            self.run_main(args, profile)
-        self.assertFalse(args.output.exists())
-        self.assertFalse(args.output.with_suffix('.manifest.json').exists())
-
-    def test_sticker_shop_refuses_missing_profile_or_hash_before_writing(self):
-        original = sample_macho()
-        self.write_ipa(original, self.sample_info())
-        for sha, section in ((main.digest(original), None), ('0' * 64, {})):
-            with self.subTest(sha=sha):
-                profile = self.profile(executable_sha256=sha, sticker_shop=section)
-                args = self.args('--entry-only', '--enable-sticker-shop')
-                with self.assertRaises(ValueError):
-                    self.run_main(args, profile)
-                self.assertFalse(args.output.exists())
-                self.assertFalse(args.output.with_suffix('.manifest.json').exists())
+        site = {'file_offset': '0x190', 'original_hex': '00000000', 'patched_hex': '20000000'}
+        profile = self.profile(
+            executable_sha256='0' * 64,
+            sticker_shop={**site, 'native_routes': {'code_cave': site},
+                          'liff_route': site, 'coin_entry': site},
+            theme_shop={**site, 'liff_route': site, 'code_cave': site},
+        )
+        args = self.args('--entry-only', '--allow-unverified')
+        manifest = self.run_main(args, profile)
+        with zipfile.ZipFile(args.output) as archive:
+            self.assertEqual(archive.read(main.EXECUTABLE),
+                             main.patched_binary(original, profile, verify_hash=False))
+        self.assertFalse(manifest['enable_sticker_shop'])
+        self.assertFalse(manifest['enable_theme_shop'])
+        self.assertNotIn('sticker_shop', manifest)
+        self.assertNotIn('theme_shop', manifest)
+        self.assertEqual(manifest['shops_skipped'],
+                         'Executable is not the audited one for this profile; '
+                         'sticker and theme shop patches skipped.')
 
     def test_streamed_archive_copy_rejects_corrupt_member(self):
         with zipfile.ZipFile(self.source, 'w') as archive:
@@ -527,8 +534,7 @@ class MainToolTests(unittest.TestCase):
 
     def test_options_are_opt_in(self):
         for flag in ('--remove-ads', '--hide-promotional-tabs', '--primary-login',
-                     '--collapse-friends-on-launch', '--enable-sticker-shop',
-                     '--enable-theme-shop', '--iphone-duo'):
+                     '--collapse-friends-on-launch', '--iphone-duo'):
             attribute = flag[2:].replace('-', '_')
             with self.subTest(flag=flag):
                 self.assertFalse(getattr(self.args(), attribute))
@@ -539,8 +545,6 @@ class MainToolTests(unittest.TestCase):
 
     def test_rejects_incompatible_options(self):
         for flags in (
-            ('--enable-sticker-shop', '--allow-unverified'),
-            ('--enable-theme-shop', '--allow-unverified'),
             ('--entry-only', '--primary-login'),
             ('--entry-only', '--remove-ads'),
             ('--entry-only', '--keychain-compat'),

@@ -421,20 +421,11 @@ def parse_args(argv=None):
                         help='Hide VOOM, News, Shopping and Discover tab buttons (verified on 26.14.0; experimental on 26.15.1 and 26.17.0)')
     parser.add_argument('--collapse-friends-on-launch', action='store_true',
                         help='Initialize the Friends section as collapsed')
-    parser.add_argument('--enable-sticker-shop', action='store_true',
-                        help='Experimentally enable audited sticker-shop routes and coin entry; normal billing and authorization still apply')
-    parser.add_argument('--enable-theme-shop', action='store_true',
-                        help='Experimentally enable the audited theme-shop feature entry and theme shop routes; implies --enable-sticker-shop')
     parser.add_argument('--iphone-duo', action='store_true',
                         help="Experimentally mark the app as built with the iOS 27.1 SDK so iPhone Duo uses the full inner display; keeps bars horizontal and shows LINE's two-column layout on the inner display")
     parser.add_argument('--allow-unverified', action='store_true',
                         help='Allow a different executable hash for a known version/build; still checks the original ARM64 instruction')
     args = parser.parse_args(argv)
-    if args.enable_theme_shop:
-        # Both shops share one code cave, so the theme patch extends the sticker set.
-        args.enable_sticker_shop = True
-    if args.enable_sticker_shop and args.allow_unverified:
-        parser.error('--enable-sticker-shop cannot be combined with --allow-unverified.')
     if args.keychain_compat:
         args.diagnostics = True
     if args.entry_only and (args.diagnostics or args.remove_ads or
@@ -465,19 +456,16 @@ def main():
             if profile.home_friends is None:
                 raise ValueError('No analyzed Friends patch is available for this IPA.')
             patch_sites += profile.home_friends['patches']
-        if args.enable_sticker_shop:
-            shop = profile.sticker_shop
-            if shop is None:
-                raise ValueError('No audited sticker-shop patch is available for this IPA.')
-            if original_sha256 != profile.executable_sha256:
-                raise ValueError('Sticker-shop patch requires an exact executable SHA-256 match.')
+        # Both shops are patched whenever this exact executable has audited sections;
+        # an unverified or not yet analyzed build is skipped and recorded instead.
+        shop = profile.sticker_shop if original_sha256 == profile.executable_sha256 else None
+        theme = profile.theme_shop if shop else None
+        if shop:
             native = shop['native_routes']
-            theme = profile.theme_shop if args.enable_theme_shop else None
-            if args.enable_theme_shop and theme is None:
-                raise ValueError('No audited theme-shop patch is available for this IPA.')
-            cave = native['code_cave'] if theme is None else theme['code_cave']
+            # Both shops share one code cave, so the theme variant replaces its code.
+            cave = theme['code_cave'] if theme else native['code_cave']
             patch_sites += [shop, shop['liff_route'], native, cave, shop['coin_entry']]
-            if theme is not None:
+            if theme:
                 patch_sites += [theme, theme['liff_route']]
         output_info = patched_info_plist(
             info, enable_icon_picker=not args.entry_only, iphone_duo=args.iphone_duo,
@@ -586,8 +574,8 @@ def main():
                 'remove_ads': args.remove_ads,
                 'hide_promotional_tabs': args.hide_promotional_tabs,
                 'collapse_friends_on_launch': args.collapse_friends_on_launch,
-                'enable_sticker_shop': args.enable_sticker_shop,
-                'enable_theme_shop': args.enable_theme_shop,
+                'enable_sticker_shop': bool(shop),
+                'enable_theme_shop': bool(theme),
                 'iphone_duo': None,
                 'source_ipa_sha256': digest_file(args.input),
                 'output_ipa_sha256': digest_file(args.output),
@@ -609,15 +597,25 @@ def main():
                                  'dylib ad hoc signature verified.')}
     if args.collapse_friends_on_launch:
         manifest['home_friends'] = profile.home_friends
-    if args.enable_sticker_shop:
+    if not shop:
+        manifest['shops_skipped'] = (
+            'Executable is not the audited one for this profile; sticker and theme shop patches skipped.'
+            if original_sha256 != profile.executable_sha256 else
+            'No audited sticker-shop patch for this build; sticker and theme shop patches skipped.'
+        )
+    elif not theme:
+        manifest['shops_skipped'] = (
+            'No audited theme-shop patch for this build; theme shop patch skipped.'
+        )
+    if shop:
         manifest['sticker_shop'] = {
-            **profile.sticker_shop,
+            **shop,
             'scope': 'Sticker availability, LIFF/native sticker routes and their shared coin entry checks only; global feature 3, theme/emoji/account guards, login identity, balance, billing, receipts, ownership and server authorization unchanged.',
             'verification': 'Static dispatch, LIFF/native/coin entry and archive checks only for this build; no IAP support added. User-reported 26.17.0 sticker purchases use coins charged in original LINE; other versions still require real-device verification.',
         }
-    if args.enable_theme_shop:
+    if theme:
         manifest['theme_shop'] = {
-            **profile.theme_shop,
+            **theme,
             'scope': 'Theme availability, the theme LIFF/native shop routes and the shared sticker code cave only; global feature 3, emoji/account guards, login identity, balance, billing, receipts, ownership and server authorization unchanged.',
             'verification': 'Static dispatch, LIFF/native route and archive checks only for this build; no IAP support added. User-reported 26.17.0 real-device testing opened and browsed the shop and applied a free downloaded theme; paid theme purchases and other versions still require verification.',
         }
@@ -700,9 +698,9 @@ def main():
         manifest.update({
             'scope': (
                 'Secondary-login entry and sticker/theme shop availability; no injected dylib or container/Keychain hooks.'
-                if args.enable_theme_shop else
+                if theme else
                 'Secondary-login entry and sticker-shop availability; no injected dylib or container/Keychain hooks.'
-                if args.enable_sticker_shop else
+                if shop else
                 'Secondary-login entry only; no injected dylib or container/Keychain hooks.'
             ),
             'source_ipa': args.input.name,
