@@ -453,22 +453,6 @@ static void NEINIconPickerAppIconViewDidLoad(id self, SEL selector) {
     NEINEmbedIconPicker(self);
 }
 
-static BOOL NEINClassDefinesMethod(Class cls, SEL selector, Method *result) {
-    unsigned count = 0;
-    Method *methods = class_copyMethodList(cls, &count);
-    if (!methods) return NO;
-    BOOL found = NO;
-    for (unsigned i = 0; i < count; ++i) {
-        if (method_getName(methods[i]) == selector) {
-            if (result) *result = methods[i];
-            found = YES;
-            break;
-        }
-    }
-    free(methods);
-    return found;
-}
-
 static void NEINInstallIconPicker(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -483,25 +467,11 @@ static void NEINInstallIconPicker(void) {
             return;
         }
 
-        SEL selector = @selector(viewDidLoad);
-        Method inherited = class_getInstanceMethod(iconClass, selector);
-        if (!NEINMethodHasType(inherited, "v", 2, NULL, NULL)) {
+        if (!NEINHookOwnMethod(iconClass, @selector(viewDidLoad), "v", 2, NULL, NULL,
+                               (IMP)NEINIconPickerAppIconViewDidLoad,
+                               &NEINOriginalAppIconViewDidLoad)) {
             NSLog(@"[NEINIconPicker] Unexpected app icon viewDidLoad signature; skipping.");
             return;
-        }
-
-        Method ownMethod = NULL;
-        if (NEINClassDefinesMethod(iconClass, selector, &ownMethod)) {
-            NEINOriginalAppIconViewDidLoad = method_setImplementation(
-                ownMethod, (IMP)NEINIconPickerAppIconViewDidLoad);
-        } else {
-            NEINOriginalAppIconViewDidLoad = method_getImplementation(inherited);
-            if (!class_addMethod(iconClass, selector,
-                                 (IMP)NEINIconPickerAppIconViewDidLoad,
-                                 method_getTypeEncoding(inherited))) {
-                NSLog(@"[NEINIconPicker] Cannot hook app icon page; skipping.");
-                return;
-            }
         }
         NSLog(@"[NEINIconPicker] LINE app icon page now hosts the NEIN picker.");
     });

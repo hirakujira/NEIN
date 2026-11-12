@@ -12,8 +12,3 @@ static BOOL NEINRecordHomeTap(NSMutableArray<NSNumber *> *times, NSTimeInterval 
     [times removeAllObjects];
     return YES;
 }
-
-static BOOL NEINIsHomeTabTitle(NSString *title) {
-    return NEINTabTitleIsOneOf(title,
-        @[@"HOME", @"首頁", @"主頁", @"主页", @"ホーム", @"홈"]);
-}

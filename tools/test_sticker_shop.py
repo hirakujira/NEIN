@@ -82,12 +82,14 @@ class StickerShopTests(unittest.TestCase):
         call(0xC2C, 0x180)
         binary = bytes(binary)
         image = analyzer.Image(
-            binary, base, base + 0x80, 0x80, len(binary) - 0x80,
-            (base + 0x80, base + 0x90, base + 0xB0, base + 0xD0, base + 0x180, base + 0x400,
-             base + 0x600, base + 0x768, base + 0x780, base + 0x78C,
-             base + 0xC00, base + 0xC4C),
-            b'\0' * 16, (), ((base, len(binary), 0, len(binary)),),
-            (0, 0, 0, 0), (0, 0),
+            data=binary, image_base=base, text_address=base + 0x80, text_offset=0x80,
+            text_size=len(binary) - 0x80,
+            function_starts=(
+                base + 0x80, base + 0x90, base + 0xB0, base + 0xD0, base + 0x180, base + 0x400,
+                base + 0x600, base + 0x768, base + 0x780, base + 0x78C,
+                base + 0xC00, base + 0xC4C,
+            ),
+            segments=((base, len(binary), 0, len(binary)),), header_end=32, text_protection=5,
         )
         methods = [{
             'class': 'UniversalFeatureController',
@@ -97,13 +99,18 @@ class StickerShopTests(unittest.TestCase):
         }]
         return binary, image, methods
 
+    def mocked(self, image, methods):
+        return mock.patch.multiple(
+            analyzer, parse_image=mock.Mock(return_value=image),
+            _objc_methods=mock.Mock(return_value=methods),
+            _analyze_native_sticker_routes=mock.Mock(return_value=self.native()),
+        )
+
     def analyze(self, binary, image, methods):
         image = replace(image, data=binary)
-        with mock.patch.object(analyzer, 'parse_image', return_value=image), \
-                mock.patch.object(analyzer, '_objc_methods', return_value=methods) as lookup, \
-                mock.patch.object(analyzer, '_analyze_native_sticker_routes', return_value=self.native()):
+        with self.mocked(image, methods):
             result = analyzer.analyze_sticker_shop_executable(binary)
-            lookup.assert_called_once_with(image, 'UniversalFeatureController')
+            analyzer._objc_methods.assert_called_once_with(image, 'UniversalFeatureController')
             return result
 
     def test_patch_only_changes_feature_zero_and_sticker_route(self):
@@ -116,7 +123,10 @@ class StickerShopTests(unittest.TestCase):
                 self.assertEqual(profile['feature'], 0)
                 self.assertEqual(profile['liff_route']['file_offset'], '0x6c8')
                 self.assertEqual(profile['liff_route']['liff_id'], '1359301715-JKd7Y7j1')
-                patched = main.patch_sticker_shop(binary, profile)
+                native = profile['native_routes']
+                sites = [profile, profile['liff_route'], native, native['code_cave'],
+                         profile['coin_entry']]
+                patched, _ = main.apply_patch_sites(binary, sites)
                 self.assertEqual(patched[:0x400], binary[:0x400])
                 self.assertEqual(patched[0x404:0x4E0], binary[0x404:0x4E0])
                 self.assertEqual(patched[0x4E4:0x500], binary[0x4E4:0x500])
@@ -130,8 +140,8 @@ class StickerShopTests(unittest.TestCase):
                 self.assertEqual(patched[0xC28:0xC2C].hex(), '00008052')
                 self.assertEqual(profile['coin_entry']['original_feature'], 3)
                 self.assertEqual(profile['coin_entry']['enabled_feature'], 0)
-                with self.assertRaisesRegex(ValueError, 'dispatch entry'):
-                    main.patch_sticker_shop(patched, profile)
+                with self.assertRaisesRegex(ValueError, 'Expected original'):
+                    main.apply_patch_sites(patched, sites)
 
     def test_changed_coin_callback_or_targets_are_rejected(self):
         binary, image, methods = self.sample()
@@ -177,10 +187,7 @@ class StickerShopTests(unittest.TestCase):
         binary, image, methods = self.sample()
         profile = self.analyze(binary, image, methods)
         route = {**profile['liff_route'], 'file_offset': '0x6cc'}
-        with mock.patch.object(analyzer, 'parse_image', return_value=image), \
-                mock.patch.object(analyzer, '_objc_methods', return_value=methods), \
-                mock.patch.object(analyzer, '_analyze_native_sticker_routes', return_value=self.native()), \
-                self.assertRaisesRegex(ValueError, 'dispatch mismatch'):
+        with self.mocked(image, methods), self.assertRaisesRegex(ValueError, 'dispatch mismatch'):
             analyzer._validate_sticker_shop_section(
                 {'sticker_shop': {**profile, 'liff_route': route}}, binary,
             )
@@ -216,9 +223,7 @@ class StickerShopTests(unittest.TestCase):
     def test_profile_cannot_redirect_patch_to_another_feature(self):
         binary, image, methods = self.sample()
         profile = self.analyze(binary, image, methods)
-        with mock.patch.object(analyzer, 'parse_image', return_value=image), \
-                mock.patch.object(analyzer, '_objc_methods', return_value=methods), \
-                mock.patch.object(analyzer, '_analyze_native_sticker_routes', return_value=self.native()):
+        with self.mocked(image, methods):
             analyzer._validate_sticker_shop_section({}, binary)
             analyzer._validate_sticker_shop_section({'sticker_shop': profile}, binary)
             for key, value in (('file_offset', '0x404'), ('feature', 1),
@@ -231,48 +236,10 @@ class StickerShopTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 analyzer._validate_sticker_shop_section({'sticker_shop': []}, binary)
 
-    def test_patch_rejects_missing_malformed_and_out_of_bounds_sites(self):
-        binary, image, methods = self.sample()
-        profile = self.analyze(binary, image, methods)
-        invalid = [
-            None, {}, {**profile, 'file_offset': '-0x4'},
-            {**profile, 'file_offset': '0x401'},
-            {**profile, 'file_offset': '0x600'},
-            {**profile, 'file_offset': None},
-            {**profile, 'original_hex': '10'},
-            {**profile, 'patched_hex': '2000000000'},
-            {**profile, 'patched_hex': 'not hex'},
-            {**profile, 'liff_route': None},
-            {**profile, 'liff_route': {}},
-            {**profile, 'liff_route': {**profile['liff_route'], 'file_offset': '0x6cc'}},
-            {**profile, 'liff_route': {**profile['liff_route'], 'patched_hex': '00008052'}},
-            {**profile, 'coin_entry': None},
-            {**profile, 'coin_entry': {}},
-            {**profile, 'coin_entry': {**profile['coin_entry'], 'patched_hex': '20008052'}},
-            {**profile, 'native_routes': None},
-            {**profile, 'native_routes': {}},
-            {**profile, 'native_routes': {**self.native(), 'deny_address': '0x100000544'}},
-            {**profile, 'native_routes': {**self.native(), 'code_cave': {
-                **self.native()['code_cave'], 'patched_hex': '00' * 56,
-            }}},
-            {**profile, 'native_routes': {**self.native(), 'code_cave': {
-                **self.native()['code_cave'], 'file_offset': '0x4e0',
-            }}},
-        ]
-        for site in invalid:
-            with self.subTest(site=site), self.assertRaises(ValueError):
-                main.patch_sticker_shop(binary, site)
-
-
 class NativeStickerRouteTests(unittest.TestCase):
     def sample(self):
         base = 0x100000000
         binary = bytearray(0x3000)
-        struct.pack_into('<II', binary, 16, 1, 72)
-        struct.pack_into('<II', binary, 32, 0x19, 72)
-        binary[40:46] = b'__TEXT'
-        struct.pack_into('<QQQQ', binary, 56, base, len(binary), 0, len(binary))
-        struct.pack_into('<II', binary, 88, 7, 5)
 
         def call(offset, target):
             struct.pack_into('<I', binary, offset, analyzer._branch26(offset, target, link=True))
@@ -314,11 +281,14 @@ class NativeStickerRouteTests(unittest.TestCase):
                 string_offset += len(encoded)
         binary = bytes(binary)
         image = analyzer.Image(
-            binary, base, base + 0x1000, 0x1000, 0x1000,
-            (base + 0x1100, base + 0x1264, base + 0x1500, base + 0x1600,
-             base + 0x1700, base + 0x1800, base + 0x1900, base + 0x1940),
-            b'\0' * 16, (), ((base, len(binary), 0, len(binary)),),
-            (0, 0, 0, 0), (0, 0),
+            data=binary, image_base=base, text_address=base + 0x1000, text_offset=0x1000,
+            text_size=0x1000,
+            function_starts=(
+                base + 0x1100, base + 0x1264, base + 0x1500, base + 0x1600,
+                base + 0x1700, base + 0x1800, base + 0x1900, base + 0x1940,
+            ),
+            segments=((base, len(binary), 0, len(binary)),), header_end=32 + 72,
+            text_protection=5,
         )
         return binary, image, {'matcher_address': hex(base + 0x1100)}
 
@@ -338,12 +308,17 @@ class NativeStickerRouteTests(unittest.TestCase):
     def test_changed_guard_types_commands_or_executable_padding_is_rejected(self):
         binary, image, route = self.sample()
         for offset in (0x131C, 0x1320, 0x1324, 0x1538, 0x1638, 0x1648,
-                       0x173C, 0x174C, 0x2500, 0x2000 + 16, 0xF00, 92):
+                       0x173C, 0x174C, 0x2500, 0x2000 + 16, 0xF00):
             altered = bytearray(binary)
             struct.pack_into('<I', altered, offset, analyzer.NOP)
             with self.subTest(offset=hex(offset)):
                 self.assertIsNone(analyzer._analyze_native_sticker_routes(
                     bytes(altered), replace(image, data=bytes(altered)), route,
+                ))
+        for fields in ({'text_protection': 7}, {'header_end': 0xEC0}):
+            with self.subTest(fields=fields):
+                self.assertIsNone(analyzer._analyze_native_sticker_routes(
+                    binary, replace(image, **fields), route,
                 ))
 
     def test_branch_generation_rejects_unaligned_and_out_of_range_targets(self):

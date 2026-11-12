@@ -1,9 +1,6 @@
-import plistlib
 import struct
 import sys
-import tempfile
 import unittest
-import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -89,11 +86,12 @@ class LoginPatchAnalyzerTests(unittest.TestCase):
         analysis = analyzer.analyze_login_executable(
             sample_macho(reference=True), version='26.15.1', build='test-build',
         )
-        document = analyzer.profile_document(analysis)
-        self.assertEqual(document['version'], '26.15.1')
-        self.assertEqual(document['patch']['file_offset'], '0xf8')
-        self.assertEqual(document['patch']['original_hex'], '40000036')
-        self.assertNotIn('analysis', document)
+        patch = analyzer.login_patch_section(analysis)
+        self.assertEqual(patch['file_offset'], '0xf8')
+        self.assertEqual(patch['virtual_address'], '0x100001030')
+        self.assertEqual(patch['instruction'], 'tbz w0, #0, 0x100001038')
+        self.assertEqual(patch['original_hex'], '40000036')
+        self.assertEqual(patch['patched_hex'], '1f2003d5')
 
     def test_analyzes_unique_friend_tab_patch_sites(self):
         binary = bytearray(sample_macho())
@@ -136,7 +134,7 @@ class LoginPatchAnalyzerTests(unittest.TestCase):
             sample_macho(), version='test', build='inconclusive',
         )
         with self.assertRaisesRegex(ValueError, 'No high-confidence'):
-            analyzer.profile_document(analysis)
+            analyzer.login_patch_section(analysis)
 
     def test_decodes_cbz_and_conditional_branch(self):
         cbz = analyzer._decode_branch(0x34000040, 0x1000)
@@ -147,24 +145,6 @@ class LoginPatchAnalyzerTests(unittest.TestCase):
     def test_rejects_non_arm64_thin_macho(self):
         with self.assertRaisesRegex(ValueError, 'thin little-endian 64-bit Mach-O'):
             analyzer.parse_arm64_macho(b'not a Mach-O')
-
-    def test_analyze_ipa_is_explicitly_read_only(self):
-        with tempfile.TemporaryDirectory() as directory:
-            ipa = Path(directory) / 'line.ipa'
-            info = {
-                'CFBundleIdentifier': 'jp.naver.line',
-                'CFBundleShortVersionString': 'test',
-                'CFBundleVersion': '1',
-            }
-            with zipfile.ZipFile(ipa, 'w') as archive:
-                archive.writestr(analyzer.PLIST, plistlib.dumps(info))
-                archive.writestr(analyzer.EXECUTABLE, sample_macho())
-
-            result = analyzer.analyze_login_ipa(ipa)
-
-        self.assertFalse(result['automatic_patch'])
-        self.assertEqual(result['structural_candidate_count'], 1)
-        self.assertEqual(result['version'], 'test')
 
 
 if __name__ == '__main__':

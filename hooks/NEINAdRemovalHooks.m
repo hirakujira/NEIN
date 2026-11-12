@@ -4,40 +4,10 @@
 #import <objc/runtime.h>
 #include "NEINObjCRuntime.h"
 
-typedef void (*NEINVoidObjectIMP)(id, SEL, id);
-typedef void (*NEINVoidObjectObjectIMP)(id, SEL, id, id);
 typedef void (*NEINVoidNoArgIMP)(id, SEL);
 typedef void (*NEINVoidBoolIMP)(id, SEL, BOOL);
 
-static BOOL NEINHook(Class cls, SEL selector, const char *returnType,
-                   unsigned argumentCount, const char *argument2,
-                   const char *argument3, IMP replacement, IMP *original) {
-    Method method = class_getInstanceMethod(cls, selector);
-    if (!NEINMethodHasType(method, returnType, argumentCount, argument2, argument3)) {
-        return NO;
-    }
-    if (original) *original = method_getImplementation(method);
-    method_setImplementation(method, replacement);
-    return YES;
-}
-
-static BOOL NEINHookClassMethodOnly(Class cls, SEL selector, const char *returnType,
-                                  unsigned argumentCount, const char *argument2,
-                                  const char *argument3, IMP replacement,
-                                  IMP *original) {
-    Method method = class_getInstanceMethod(cls, selector);
-    if (!NEINMethodHasType(method, returnType, argumentCount, argument2, argument3)) {
-        return NO;
-    }
-    IMP previous = method_getImplementation(method);
-    if (original) *original = previous;
-    const char *encoding = method_getTypeEncoding(method);
-    if (!class_addMethod(cls, selector, replacement, encoding)) {
-        method_setImplementation(method, replacement);
-    }
-    return YES;
-}
-
+#ifdef NEIN_MULTI_REMOVE_ADS
 static void NEINNoopObject(id self, SEL selector, id object) {
     (void)self;
     (void)selector;
@@ -149,6 +119,62 @@ static void NEINViewControllerDidAppear(id self, SEL selector, BOOL animated) {
     if (view) NEINHideAdvertisingSubviews(view);
 }
 
+static void NEINInstallAdvertisingLoaderHooks(void) {
+    Class interstitial = NSClassFromString(@"GADInterstitialAd");
+    if (interstitial) {
+        NEINHook(interstitial, @selector(presentFromRootViewController:), "v", 3, "@", NULL,
+               (IMP)NEINNoopObject, NULL);
+        NEINHookClassMethod(interstitial,
+               @selector(loadWithAdUnitID:request:completionHandler:), "v", 5, "@", "@",
+               (IMP)NEINFailAdLoad, NULL);
+    }
+    Class rewarded = NSClassFromString(@"GADRewardedAd");
+    if (rewarded) {
+        NEINHook(rewarded, @selector(presentFromRootViewController:userDidEarnRewardHandler:),
+               "v", 4, "@", "@?", (IMP)NEINNoopObjectObject, NULL);
+        NEINHookClassMethod(rewarded,
+               @selector(loadWithAdUnitID:request:completionHandler:), "v", 5, "@", "@",
+               (IMP)NEINFailAdLoad, NULL);
+    }
+    Class appOpen = NSClassFromString(@"GADAppOpenAd");
+    if (appOpen) {
+        NEINHook(appOpen, @selector(presentFromRootViewController:), "v", 3, "@", NULL,
+               (IMP)NEINNoopObject, NULL);
+        NEINHookClassMethod(appOpen,
+               @selector(loadWithAdUnitID:request:completionHandler:), "v", 5, "@", "@",
+               (IMP)NEINFailAdLoad, NULL);
+    }
+    Class rewardedInterstitial = NSClassFromString(@"GADRewardedInterstitialAd");
+    if (rewardedInterstitial) {
+        NEINHookClassMethod(rewardedInterstitial,
+               @selector(loadWithAdUnitID:request:completionHandler:), "v", 5, "@", "@",
+               (IMP)NEINFailAdLoad, NULL);
+    }
+    Class gamInterstitial = NSClassFromString(@"GAMInterstitialAd");
+    if (gamInterstitial) {
+        NEINHookClassMethod(gamInterstitial,
+               @selector(loadWithAdManagerAdUnitID:request:completionHandler:), "v", 5,
+               "@", "@", (IMP)NEINFailAdLoad, NULL);
+    }
+    Class imaManager = NSClassFromString(@"IMAAdsManager");
+    if (imaManager) {
+        NEINHook(imaManager, @selector(start), "v", 2, NULL, NULL,
+               (IMP)NEINNoopNoArg, NULL);
+    }
+}
+
+static void NEINInstallAdvertisingCleanupHook(void) {
+    Class view = UIView.class;
+    NEINHook(view, @selector(didMoveToSuperview), "v", 2, NULL, NULL,
+           (IMP)NEINViewDidMoveToSuperview,
+           (IMP *)&NEINOriginalViewDidMoveToSuperview);
+    Class controller = UIViewController.class;
+    NEINHook(controller, @selector(viewDidAppear:), "v", 3, "B", NULL,
+           (IMP)NEINViewControllerDidAppear, (IMP *)&NEINOriginalViewDidAppear);
+}
+#endif
+
+#ifdef NEIN_MULTI_HIDE_PROMOTIONAL_TABS
 static void NEINOpenLineSettings(UITabBarController *controller) {
     // Route inside this app. UIApplication.openURL could launch the original LINE.
     if (!controller.viewIfLoaded.window || controller.presentedViewController) return;
@@ -179,9 +205,6 @@ static UITabBarAppearance *NEINPresentationTabAppearance(UITabBarAppearance *sou
 }
 
 #include "NEINVisibleTabBar.h"
-#ifdef NEIN_MULTI_TAB_DIAGNOSTICS
-#include "NEINTabDiagnostics.h"
-#endif
 
 static NEINVoidNoArgIMP NEINOriginalTabBarLayout;
 static NEINVoidNoArgIMP NEINOriginalSourceTabBarLayout;
@@ -236,9 +259,6 @@ static void NEINTabBarControllerDidLayoutSubviews(id self, SEL selector) {
     if (NEINOriginalTabBarLayout) NEINOriginalTabBarLayout(self, selector);
     if (![self isKindOfClass:UITabBarController.class]) return;
     NEINUpdateVisibleTabBar(self);
-#ifdef NEIN_MULTI_TAB_DIAGNOSTICS
-    NEINInstallTabDiagnosticButton(self);
-#endif
 }
 
 static void NEINSourceTabBarLayout(id self, SEL selector) {
@@ -271,128 +291,47 @@ static void NEINSetVisibleSelectedController(id self, SEL selector, UIViewContro
     NEINOriginalSelectedController(self, selector, requested);
 }
 
-static void NEINInstallAdvertisingLoaderHooks(void) {
-#ifndef NEIN_MULTI_REMOVE_ADS
-    Class gadLoader = NSClassFromString(@"GADAdLoader");
-    if (gadLoader) {
-        NEINHook(gadLoader, @selector(loadRequest:), "v", 3, "@", NULL,
-               (IMP)NEINNoopObject, NULL);
-        NEINHook(gadLoader, @selector(loadRequestWithTarget:), "v", 3, "@", NULL,
-               (IMP)NEINNoopObject, NULL);
-        NEINHook(gadLoader, @selector(loadWithAdResponseString:), "v", 3, "@", NULL,
-               (IMP)NEINNoopObject, NULL);
-    }
-
-    Class banner = NSClassFromString(@"GADBannerView");
-    if (banner) {
-        NEINHook(banner, @selector(loadRequest:), "v", 3, "@", NULL,
-               (IMP)NEINNoopObject, NULL);
-        NEINHook(banner, @selector(loadWithAdResponseString:), "v", 3, "@", NULL,
-               (IMP)NEINNoopObject, NULL);
-        NEINHook(banner, @selector(loadWithTargeting:), "v", 3, "@", NULL,
-               (IMP)NEINNoopObject, NULL);
-    }
-#endif
-
-    Class interstitial = NSClassFromString(@"GADInterstitialAd");
-    if (interstitial) {
-        NEINHook(interstitial, @selector(presentFromRootViewController:), "v", 3, "@", NULL,
-               (IMP)NEINNoopObject, NULL);
-        NEINHookClassMethod(interstitial,
-               @selector(loadWithAdUnitID:request:completionHandler:), "v", 5, "@", "@",
-               (IMP)NEINFailAdLoad, NULL);
-    }
-    Class rewarded = NSClassFromString(@"GADRewardedAd");
-    if (rewarded) {
-        NEINHook(rewarded, @selector(presentFromRootViewController:userDidEarnRewardHandler:),
-               "v", 4, "@", "@?", (IMP)NEINNoopObjectObject, NULL);
-        NEINHookClassMethod(rewarded,
-               @selector(loadWithAdUnitID:request:completionHandler:), "v", 5, "@", "@",
-               (IMP)NEINFailAdLoad, NULL);
-    }
-    Class appOpen = NSClassFromString(@"GADAppOpenAd");
-    if (appOpen) {
-        NEINHook(appOpen, @selector(presentFromRootViewController:), "v", 3, "@", NULL,
-               (IMP)NEINNoopObject, NULL);
-        NEINHookClassMethod(appOpen,
-               @selector(loadWithAdUnitID:request:completionHandler:), "v", 5, "@", "@",
-               (IMP)NEINFailAdLoad, NULL);
-    }
-    Class rewardedInterstitial = NSClassFromString(@"GADRewardedInterstitialAd");
-    if (rewardedInterstitial) {
-        NEINHookClassMethod(rewardedInterstitial,
-               @selector(loadWithAdUnitID:request:completionHandler:), "v", 5, "@", "@",
-               (IMP)NEINFailAdLoad, NULL);
-    }
-    Class gamInterstitial = NSClassFromString(@"GAMInterstitialAd");
-    if (gamInterstitial) {
-        NEINHookClassMethod(gamInterstitial,
-               @selector(loadWithAdManagerAdUnitID:request:completionHandler:), "v", 5,
-               "@", "@", (IMP)NEINFailAdLoad, NULL);
-    }
-
-#ifndef NEIN_MULTI_REMOVE_ADS
-    Class imaLoader = NSClassFromString(@"IMAAdsLoader");
-    if (imaLoader) {
-        NEINHook(imaLoader, @selector(requestAdsWithRequest:), "v", 3, "@", NULL,
-               (IMP)NEINNoopObject, NULL);
-    }
-#endif
-    Class imaManager = NSClassFromString(@"IMAAdsManager");
-    if (imaManager) {
-        NEINHook(imaManager, @selector(start), "v", 2, NULL, NULL,
-               (IMP)NEINNoopNoArg, NULL);
-    }
-}
-
-static void NEINInstallAdvertisingCleanupHook(void) {
-    Class view = UIView.class;
-    NEINHook(view, @selector(didMoveToSuperview), "v", 2, NULL, NULL,
-           (IMP)NEINViewDidMoveToSuperview,
-           (IMP *)&NEINOriginalViewDidMoveToSuperview);
-    Class controller = UIViewController.class;
-    NEINHook(controller, @selector(viewDidAppear:), "v", 3, "B", NULL,
-           (IMP)NEINViewControllerDidAppear, (IMP *)&NEINOriginalViewDidAppear);
-}
-
 static void NEINInstallPromotionalTabHooks(void) {
-    NEINHookClassMethodOnly(UITabBar.class, @selector(setAlpha:), "v", 3, @encode(CGFloat), NULL,
-                          (IMP)NEINSourceTabSetAlpha, (IMP *)&NEINOriginalTabAlpha);
-    NEINHookClassMethodOnly(UITabBar.class, @selector(setHidden:), "v", 3, @encode(BOOL), NULL,
-                          (IMP)NEINSourceTabSetHidden, (IMP *)&NEINOriginalTabHidden);
-    NEINHookClassMethodOnly(UITabBar.class, @selector(setFrame:), "v", 3, @encode(CGRect), NULL,
-                          (IMP)NEINSourceTabSetFrame, (IMP *)&NEINOriginalTabFrame);
-    NEINHookClassMethodOnly(UITabBar.class, @selector(setCenter:), "v", 3, @encode(CGPoint), NULL,
-                          (IMP)NEINSourceTabSetCenter, (IMP *)&NEINOriginalTabCenter);
-    NEINHookClassMethodOnly(UITabBar.class, @selector(setBounds:), "v", 3, @encode(CGRect), NULL,
-                          (IMP)NEINSourceTabSetBounds, (IMP *)&NEINOriginalTabBounds);
-    NEINHookClassMethodOnly(UITabBar.class, @selector(setTransform:), "v", 3, @encode(CGAffineTransform), NULL,
-                          (IMP)NEINSourceTabSetTransform, (IMP *)&NEINOriginalTabTransform);
-    NEINHookClassMethodOnly(UINavigationController.class, @selector(viewWillLayoutSubviews),
-                          "v", 2, NULL, NULL, (IMP)NEINNavigationWillLayout,
-                          (IMP *)&NEINOriginalNavigationWillLayout);
+    NEINHookOwnMethod(UITabBar.class, @selector(setAlpha:), "v", 3, @encode(CGFloat), NULL,
+                    (IMP)NEINSourceTabSetAlpha, (IMP *)&NEINOriginalTabAlpha);
+    NEINHookOwnMethod(UITabBar.class, @selector(setHidden:), "v", 3, @encode(BOOL), NULL,
+                    (IMP)NEINSourceTabSetHidden, (IMP *)&NEINOriginalTabHidden);
+    NEINHookOwnMethod(UITabBar.class, @selector(setFrame:), "v", 3, @encode(CGRect), NULL,
+                    (IMP)NEINSourceTabSetFrame, (IMP *)&NEINOriginalTabFrame);
+    NEINHookOwnMethod(UITabBar.class, @selector(setCenter:), "v", 3, @encode(CGPoint), NULL,
+                    (IMP)NEINSourceTabSetCenter, (IMP *)&NEINOriginalTabCenter);
+    NEINHookOwnMethod(UITabBar.class, @selector(setBounds:), "v", 3, @encode(CGRect), NULL,
+                    (IMP)NEINSourceTabSetBounds, (IMP *)&NEINOriginalTabBounds);
+    NEINHookOwnMethod(UITabBar.class, @selector(setTransform:), "v", 3, @encode(CGAffineTransform), NULL,
+                    (IMP)NEINSourceTabSetTransform, (IMP *)&NEINOriginalTabTransform);
+    NEINHookOwnMethod(UINavigationController.class, @selector(viewWillLayoutSubviews),
+                    "v", 2, NULL, NULL, (IMP)NEINNavigationWillLayout,
+                    (IMP *)&NEINOriginalNavigationWillLayout);
     Class controller = UITabBarController.class;
-    NEINHookClassMethodOnly(controller, @selector(setSelectedIndex:),
-                          "v", 3, @encode(NSUInteger), NULL,
-                          (IMP)NEINSetVisibleSelectedIndex, (IMP *)&NEINOriginalSelectedIndex);
-    NEINHookClassMethodOnly(controller, @selector(setSelectedViewController:),
-                          "v", 3, "@", NULL,
-                          (IMP)NEINSetVisibleSelectedController, (IMP *)&NEINOriginalSelectedController);
-    NEINHookClassMethodOnly(controller, @selector(viewDidLayoutSubviews),
-                          "v", 2, NULL, NULL, (IMP)NEINTabBarControllerDidLayoutSubviews,
-                          (IMP *)&NEINOriginalTabBarLayout);
-    NEINHookClassMethodOnly(UITabBar.class, @selector(layoutSubviews),
-                          "v", 2, NULL, NULL, (IMP)NEINSourceTabBarLayout,
-                          (IMP *)&NEINOriginalSourceTabBarLayout);
+    NEINHookOwnMethod(controller, @selector(setSelectedIndex:),
+                    "v", 3, @encode(NSUInteger), NULL,
+                    (IMP)NEINSetVisibleSelectedIndex, (IMP *)&NEINOriginalSelectedIndex);
+    NEINHookOwnMethod(controller, @selector(setSelectedViewController:),
+                    "v", 3, "@", NULL,
+                    (IMP)NEINSetVisibleSelectedController, (IMP *)&NEINOriginalSelectedController);
+    NEINHookOwnMethod(controller, @selector(viewDidLayoutSubviews),
+                    "v", 2, NULL, NULL, (IMP)NEINTabBarControllerDidLayoutSubviews,
+                    (IMP *)&NEINOriginalTabBarLayout);
+    NEINHookOwnMethod(UITabBar.class, @selector(layoutSubviews),
+                    "v", 2, NULL, NULL, (IMP)NEINSourceTabBarLayout,
+                    (IMP *)&NEINOriginalSourceTabBarLayout);
 }
+#endif
 
-void NEINInstallAdRemovalCompat(BOOL removeAds, BOOL hidePromotionalTabs) {
+static void NEINInstallAdRemovalCompat(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        if (removeAds) {
-            NEINInstallAdvertisingLoaderHooks();
-            NEINInstallAdvertisingCleanupHook();
-        }
-        if (hidePromotionalTabs) NEINInstallPromotionalTabHooks();
+#ifdef NEIN_MULTI_REMOVE_ADS
+        NEINInstallAdvertisingLoaderHooks();
+        NEINInstallAdvertisingCleanupHook();
+#endif
+#ifdef NEIN_MULTI_HIDE_PROMOTIONAL_TABS
+        NEINInstallPromotionalTabHooks();
+#endif
     });
 }

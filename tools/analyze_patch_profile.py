@@ -16,7 +16,6 @@ import zipfile
 
 EXECUTABLE = 'Payload/LINE.app/LINE'
 PLIST = 'Payload/LINE.app/Info.plist'
-LOGIN_PROFILE_SCHEMA_VERSION = 1
 NOP = 0xD503201F
 REFERENCE_BRANCH_INDEX = 12
 REFERENCE_WINDOW_START = -12
@@ -34,12 +33,50 @@ MIN_MATCH_MARGIN = 0.12
 
 
 @dataclass(frozen=True)
-class MachOImage:
+class Section:
+    segment: str
+    name: str
+    address: int
+    size: int
+    file_offset: int
+    flags: int
+    reserved1: int
+    reserved2: int
+
+
+@dataclass(frozen=True)
+class Image:
+    data: bytes
     image_base: int
     text_address: int
     text_offset: int
     text_size: int
     function_starts: tuple[int, ...]
+    segments: tuple[tuple[int, int, int, int], ...]
+    header_end: int
+    text_protection: int
+    sections: tuple[Section, ...] = ()
+    uuid: bytes | None = None
+    symbol_table: tuple[int, int, int, int] | None = None
+    indirect_symbol_table: tuple[int, int] | None = None
+
+    def file_offset(self, address):
+        for vm_address, _, file_offset, file_size in self.segments:
+            if vm_address <= address < vm_address + file_size:
+                return file_offset + address - vm_address
+        raise ValueError(f'Address is not file-backed: {address:#x}')
+
+    def section(self, name, segment=None):
+        matches = [
+            item for item in self.sections
+            if item.name == name and (segment is None or item.segment == segment)
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f'Expected one {segment or "*"} section named {name}, '
+                f'found {len(matches)}.'
+            )
+        return matches[0]
 
 
 @dataclass(frozen=True)
@@ -93,8 +130,14 @@ def parse_arm64_macho(data):
 
     cursor = 32
     image_base = None
+    text_protection = None
     text_section = None
     function_starts_command = None
+    uuid = None
+    symbol_table = None
+    dysymtab = None
+    sections = []
+    segments = []
     for _ in range(command_count):
         if cursor + 8 > command_end:
             raise ValueError('Truncated Mach-O load command.')
@@ -104,26 +147,44 @@ def parse_arm64_macho(data):
         if command == 0x19:  # LC_SEGMENT_64
             if size < 72:
                 raise ValueError('Truncated LC_SEGMENT_64 command.')
-            section_count = struct.unpack_from('<I', data, cursor + 64)[0]
-            expected_size = 72 + section_count * 80
-            if expected_size > size:
+            segment = struct.unpack_from('<QQQQ', data, cursor + 24)
+            segments.append(segment)
+            protection, section_count = struct.unpack_from('<II', data, cursor + 60)
+            if 72 + section_count * 80 > size:
                 raise ValueError('Invalid Mach-O section table.')
-            segment_name = data[cursor + 8:cursor + 24].split(b'\0', 1)[0]
-            if segment_name == b'__TEXT':
-                image_base = struct.unpack_from('<Q', data, cursor + 24)[0]
-            section_cursor = cursor + 72
-            for _ in range(section_count):
-                section_name = data[section_cursor:section_cursor + 16].split(b'\0', 1)[0]
-                segment_name = data[section_cursor + 16:section_cursor + 32].split(b'\0', 1)[0]
+            if data[cursor + 8:cursor + 24].split(b'\0', 1)[0] == b'__TEXT':
+                image_base = segment[0]
+                text_protection = protection
+            for section_cursor in range(cursor + 72, cursor + 72 + section_count * 80, 80):
+                section_name = data[section_cursor:section_cursor + 16].split(b'\0', 1)[0].decode()
+                segment_name = data[section_cursor + 16:section_cursor + 32].split(b'\0', 1)[0].decode()
                 address, section_size = struct.unpack_from('<QQ', data, section_cursor + 32)
-                file_offset = struct.unpack_from('<I', data, section_cursor + 48)[0]
-                if (segment_name, section_name) == (b'__TEXT', b'__text'):
+                file_offset, _, _, _, flags, reserved1, reserved2, _ = (
+                    struct.unpack_from('<8I', data, section_cursor + 48)
+                )
+                sections.append(Section(
+                    segment_name, section_name, address, section_size,
+                    file_offset, flags, reserved1, reserved2,
+                ))
+                if (segment_name, section_name) == ('__TEXT', '__text'):
                     text_section = (address, section_size, file_offset)
-                section_cursor += 80
         elif command == 0x26:  # LC_FUNCTION_STARTS
             if size < 16:
                 raise ValueError('Truncated LC_FUNCTION_STARTS command.')
             function_starts_command = struct.unpack_from('<II', data, cursor + 8)
+        elif command == 0x1b:  # LC_UUID
+            if size < 24:
+                raise ValueError('Truncated LC_UUID.')
+            uuid = data[cursor + 8:cursor + 24]
+        elif command == 0x2:  # LC_SYMTAB
+            if size < 24:
+                raise ValueError('Truncated LC_SYMTAB.')
+            symbol_table = struct.unpack_from('<IIII', data, cursor + 8)
+        elif command == 0xb:  # LC_DYSYMTAB
+            if size < 80:
+                raise ValueError('Truncated LC_DYSYMTAB.')
+            fields = struct.unpack_from('<18I', data, cursor + 8)
+            dysymtab = (fields[12], fields[13])
         cursor += size
     if cursor != command_end:
         raise ValueError('Mach-O load-command size mismatch.')
@@ -150,12 +211,42 @@ def parse_arm64_macho(data):
         raise ValueError('LC_FUNCTION_STARTS contains an entry outside __text.')
     if starts != sorted(set(starts)):
         raise ValueError('LC_FUNCTION_STARTS entries are not strictly increasing.')
-    return MachOImage(image_base, text_address, text_offset, text_size, tuple(starts))
+    return Image(
+        data=data,
+        image_base=image_base,
+        text_address=text_address,
+        text_offset=text_offset,
+        text_size=text_size,
+        function_starts=tuple(starts),
+        segments=tuple(segments),
+        header_end=command_end,
+        text_protection=text_protection,
+        sections=tuple(sections),
+        uuid=uuid,
+        symbol_table=symbol_table,
+        indirect_symbol_table=dysymtab,
+    )
+
+
+def parse_image(data):
+    image = parse_arm64_macho(data)
+    if image.uuid is None or image.symbol_table is None or image.indirect_symbol_table is None:
+        raise ValueError('Mach-O is missing UUID or import symbol metadata.')
+    return image
 
 
 def _sign_extend(value, bits):
     sign_bit = 1 << (bits - 1)
     return value - (1 << bits) if value & sign_bit else value
+
+
+def _branch_target(address, instruction):
+    return address + (_sign_extend(instruction & 0x03FFFFFF, 26) << 2)
+
+
+def _adrp_add_target(address, adrp, add):
+    immediate = ((adrp >> 5) & 0x7FFFF) << 2 | ((adrp >> 29) & 3)
+    return (address & ~0xFFF) + (_sign_extend(immediate, 21) << 12) + ((add >> 10) & 0xFFF)
 
 
 def _decode_branch(instruction, address):
@@ -198,11 +289,9 @@ def _format_instruction(instruction, address):
     if instruction == NOP:
         return 'nop'
     if instruction & 0xFC000000 == 0x94000000:  # BL
-        immediate = _sign_extend(instruction & 0x03FFFFFF, 26) << 2
-        return f'bl 0x{address + immediate:x}'
+        return f'bl 0x{_branch_target(address, instruction):x}'
     if instruction & 0xFC000000 == 0x14000000:  # B
-        immediate = _sign_extend(instruction & 0x03FFFFFF, 26) << 2
-        return f'b 0x{address + immediate:x}'
+        return f'b 0x{_branch_target(address, instruction):x}'
     if instruction & 0xFFE0001F == 0xD4200000:  # BRK
         return f'brk #{(instruction >> 5) & 0xFFFF}'
     return f'.word 0x{instruction:08x}'
@@ -345,71 +434,29 @@ def analyze_login_executable(executable, version=None, build=None, context_instr
     }
 
 
-def analyze_login_ipa(path, context_instructions=4):
-    with zipfile.ZipFile(path) as archive:
-        names = archive.namelist()
-        if len(names) != len(set(names)):
-            raise ValueError('Duplicate ZIP entry names are not supported.')
-        info = plistlib.loads(archive.read(PLIST))
-        if info.get('CFBundleIdentifier') != 'jp.naver.line':
-            raise ValueError('Expected the original jp.naver.line bundle identifier.')
-        executable = archive.read(EXECUTABLE)
-    result = analyze_login_executable(
-        executable,
-        info.get('CFBundleShortVersionString'),
-        info.get('CFBundleVersion'),
-        context_instructions,
-    )
-    result['ipa'] = str(path)
-    return result
-
-
-def profile_document(result):
-    offset = result.get('recommended_patch_offset')
-    if offset is None:
+def login_patch_section(result):
+    # validate_profile re-checks the branch against the executable afterwards.
+    if result.get('recommended_patch_offset') is None:
         raise ValueError('No high-confidence login patch candidate to save.')
-    candidates = result.get('candidates', ())
-    candidate = next(
-        (item for item in candidates if item.get('file_offset') == int(offset, 16)),
-        None,
-    )
-    if candidate is None:
-        raise ValueError('Recommended candidate is missing from the analysis report.')
-    original_hex = candidate.get('original_hex', '')
-    if len(bytes.fromhex(original_hex)) != 4:
-        raise ValueError('Recommended candidate does not contain one ARM64 instruction.')
-    instruction = struct.unpack('<I', bytes.fromhex(original_hex))[0]
-    branch = _decode_branch(instruction, candidate['virtual_address'])
-    if (
-        not branch or branch[0] != candidate['instruction'] or
-        branch[1] != candidate['target_address']
-    ):
-        raise ValueError('Recommended candidate instruction failed profile validation.')
+    candidate = result['candidates'][0]
     return {
-        'schema_version': LOGIN_PROFILE_SCHEMA_VERSION,
-        'bundle_identifier': 'jp.naver.line',
-        'version': result['version'],
-        'build': result['build'],
-        'executable_sha256': result['executable_sha256'],
-        'architecture': 'arm64',
-        'patch': {
-            'kind': 'secondary_login_entry_branch',
-            'file_offset': offset,
-            'virtual_address': hex(candidate['virtual_address']),
-            'target_address': hex(candidate['target_address']),
-            'instruction': (
-                f"{candidate['instruction']}, "
-                f"0x{candidate['target_address']:x}"
-            ),
-            'original_hex': original_hex,
-            'patched_hex': struct.pack('<I', NOP).hex(),
-        },
+        'kind': 'secondary_login_entry_branch',
+        'file_offset': result['recommended_patch_offset'],
+        'virtual_address': hex(candidate['virtual_address']),
+        'target_address': hex(candidate['target_address']),
+        'instruction': (
+            f"{candidate['instruction']}, "
+            f"0x{candidate['target_address']:x}"
+        ),
+        'original_hex': candidate['original_hex'],
+        'patched_hex': struct.pack('<I', NOP).hex(),
     }
 
 
 
 KEYCHAIN_PROFILE_SCHEMA_VERSION = 1
 REFERENCE_VERSION = '26.14.0'
+REFERENCE_UUID = '0bab483cca8538ce89840c20c92511e4'
 
 OPERATIONS = {
     'add': '_SecItemAdd',
@@ -431,133 +478,6 @@ REFERENCE_FUNCTION_RANGES = (
 )
 MIN_E2EE_MATCH_SCORE = 0.70
 MIN_E2EE_MATCH_MARGIN = 0.15
-
-
-@dataclass(frozen=True)
-class Section:
-    segment: str
-    name: str
-    address: int
-    size: int
-    file_offset: int
-    flags: int
-    reserved1: int
-    reserved2: int
-
-
-@dataclass(frozen=True)
-class Image:
-    data: bytes
-    image_base: int
-    text_address: int
-    text_offset: int
-    text_size: int
-    function_starts: tuple[int, ...]
-    uuid: bytes
-    sections: tuple[Section, ...]
-    segments: tuple[tuple[int, int, int, int], ...]
-    symbol_table: tuple[int, int, int, int]
-    indirect_symbol_table: tuple[int, int]
-
-    def file_offset(self, address):
-        for vm_address, _, file_offset, file_size in self.segments:
-            if vm_address <= address < vm_address + file_size:
-                return file_offset + address - vm_address
-        raise ValueError(f'Address is not file-backed: {address:#x}')
-
-    def section(self, name, segment=None):
-        matches = [
-            item for item in self.sections
-            if item.name == name and (segment is None or item.segment == segment)
-        ]
-        if len(matches) != 1:
-            raise ValueError(
-                f'Expected one {segment or "*"} section named {name}, '
-                f'found {len(matches)}.'
-            )
-        return matches[0]
-
-
-def parse_image(data):
-    parsed = parse_arm64_macho(data)
-    command_count, command_size = struct.unpack_from('<II', data, 16)
-    command_end = 32 + command_size
-    cursor = 32
-    uuid = None
-    symbol_table = None
-    dysymtab = None
-    sections = []
-    segments = []
-
-    for _ in range(command_count):
-        if cursor + 8 > command_end:
-            raise ValueError('Truncated Mach-O load command.')
-        command, size = struct.unpack_from('<II', data, cursor)
-        if size < 8 or cursor + size > command_end:
-            raise ValueError('Invalid Mach-O load-command size.')
-        if command == 0x1b:  # LC_UUID
-            if size < 24:
-                raise ValueError('Truncated LC_UUID.')
-            uuid = data[cursor + 8:cursor + 24]
-        elif command == 0x2:  # LC_SYMTAB
-            if size < 24:
-                raise ValueError('Truncated LC_SYMTAB.')
-            symbol_table = struct.unpack_from('<IIII', data, cursor + 8)
-        elif command == 0xb:  # LC_DYSYMTAB
-            if size < 80:
-                raise ValueError('Truncated LC_DYSYMTAB.')
-            fields = struct.unpack_from('<18I', data, cursor + 8)
-            dysymtab = (fields[12], fields[13])
-        elif command == 0x19:  # LC_SEGMENT_64
-            if size < 72:
-                raise ValueError('Truncated LC_SEGMENT_64.')
-            segment_name = data[cursor + 8:cursor + 24].split(b'\0', 1)[0].decode()
-            vm_address, vm_size, file_offset, file_size = struct.unpack_from(
-                '<QQQQ', data, cursor + 24,
-            )
-            segments.append((vm_address, vm_size, file_offset, file_size))
-            section_count = struct.unpack_from('<I', data, cursor + 64)[0]
-            if 72 + section_count * 80 > size:
-                raise ValueError('Invalid Mach-O section table.')
-            section_cursor = cursor + 72
-            for _ in range(section_count):
-                section_name = data[section_cursor:section_cursor + 16].split(
-                    b'\0', 1,
-                )[0].decode()
-                section_segment = data[section_cursor + 16:section_cursor + 32].split(
-                    b'\0', 1,
-                )[0].decode()
-                address, section_size = struct.unpack_from(
-                    '<QQ', data, section_cursor + 32,
-                )
-                file_offset, _, _, _, flags, reserved1, reserved2, _ = (
-                    struct.unpack_from('<IIIIIIII', data, section_cursor + 48)
-                )
-                sections.append(Section(
-                    section_segment, section_name, address, section_size,
-                    file_offset, flags, reserved1, reserved2,
-                ))
-                section_cursor += 80
-        cursor += size
-
-    if (
-        uuid is None or symbol_table is None or dysymtab is None or
-        cursor != command_end
-    ):
-        raise ValueError('Mach-O is missing UUID or import symbol metadata.')
-    return Image(
-        data=data,
-        image_base=parsed.image_base,
-        text_address=parsed.text_address,
-        text_offset=parsed.text_offset,
-        text_size=parsed.text_size,
-        function_starts=parsed.function_starts,
-        uuid=uuid,
-        sections=tuple(sections),
-        segments=tuple(segments),
-        symbol_table=symbol_table,
-        indirect_symbol_table=dysymtab,
-    )
 
 
 def _symbol_names(image):
@@ -734,10 +654,7 @@ def _function_calls(image, start, end, stubs):
         instruction = struct.unpack_from('<I', text, instruction_offset)[0]
         if instruction & 0xfc000000 != 0x94000000:
             continue
-        immediate = instruction & 0x03ffffff
-        if immediate & 0x02000000:
-            immediate -= 0x04000000
-        target = start + instruction_offset + (immediate << 2)
+        target = _branch_target(start + instruction_offset, instruction)
         operation = next(
             (name for name, address in stubs.items()
              if address == target),
@@ -830,39 +747,15 @@ def _reference_anchors(image, stubs):
 
 def _candidate_e2ee_functions(image, stubs):
     calls_by_function = {}
-    for match in re.finditer(rb'[\x94-\x97]', image.data[image.text_offset + 3:
-                                                       image.text_offset + image.text_size:4]):
-        relative = match.start() * 4
-        instruction = struct.unpack_from(
-            '<I', image.data, image.text_offset + relative,
-        )[0]
-        if instruction & 0xfc000000 != 0x94000000:
-            continue
-        immediate = instruction & 0x03ffffff
-        if immediate & 0x02000000:
-            immediate -= 0x04000000
-        address = image.text_address + relative
-        target = address + (immediate << 2)
-        operation = next(
-            (name for name, stub in stubs.items() if stub == target), None,
-        )
-        if operation is None:
-            continue
-        start, end = _function_bounds(address, image)
-        key = (start, end)
-        calls_by_function.setdefault(key, []).append({
-            'operation': operation,
-            'return_offset': hex(address + 4 - image.image_base),
-        })
+    text_end = image.text_address + image.text_size
+    for call in _function_calls(image, image.text_address, text_end, stubs):
+        address = image.image_base + int(call['return_offset'], 16) - 4
+        calls_by_function.setdefault(_function_bounds(address, image), []).append(call)
     return calls_by_function
 
 
 def _match_e2ee_anchors(image, stubs, anchors):
-    functions = _candidate_e2ee_functions(image, stubs)
-    available = {
-        bounds: calls
-        for bounds, calls in functions.items()
-    }
+    available = _candidate_e2ee_functions(image, stubs)
     selected = []
     for anchor in anchors:
         expected_operations = tuple(anchor['operations'])
@@ -900,7 +793,8 @@ def analyze_keychain_executable(executable, version, build, reference_profile=No
     image = parse_image(executable)
     stubs, got = _resolve_imports(image)
     authentication_sites = _authentication_sites(image, stubs)
-    if image.uuid.hex() == '0bab483cca8538ce89840c20c92511e4':
+    is_reference = image.uuid.hex() == REFERENCE_UUID
+    if is_reference:
         anchors = _reference_anchors(image, stubs)
         e2ee_sites = [
             call
@@ -949,10 +843,7 @@ def analyze_keychain_executable(executable, version, build, reference_profile=No
         },
         'authentication_sites': authentication_sites,
         'e2ee_sites': e2ee_sites,
-        'e2ee_reference_signatures': (
-            anchors if image.uuid.hex() == '0bab483cca8538ce89840c20c92511e4'
-            else None
-        ),
+        'e2ee_reference_signatures': anchors if is_reference else None,
     }
 
 
@@ -1023,10 +914,7 @@ def _verify_profile_sites(profile, image, stubs):
             instruction = struct.unpack_from('<I', image.data, file_offset)[0]
             if instruction & 0xfc000000 != 0x94000000:
                 raise ValueError(f'Keychain profile site is not a BL: {site}.')
-            immediate = instruction & 0x03ffffff
-            if immediate & 0x02000000:
-                immediate -= 0x04000000
-            if call_address + (immediate << 2) != stubs[site['operation']]:
+            if _branch_target(call_address, instruction) != stubs[site['operation']]:
                 raise ValueError(f'Keychain profile BL target mismatch: {site}.')
 
 
@@ -1040,12 +928,6 @@ def render_c_header(profile):
     got = profile['got']
     got_address = int(got['address'], 16)
     got_offset = int(got['offset'], 16)
-    imports = profile['imports']
-    if [
-        int(imports[name]['got_address'], 16)
-        for name in ('add', 'copy', 'delete', 'update')
-    ] != list(range(got_address, got_address + 32, 8)):
-        raise ValueError('Keychain imports do not match the profile GOT base.')
     if len(profile['authentication_sites']) > 64 or len(profile['e2ee_sites']) > 64:
         raise ValueError('Too many Keychain sites for a generated C profile.')
     lines = [
@@ -1090,8 +972,6 @@ def render_c_header(profile):
 
 ROOT = Path(__file__).resolve().parents[1]
 PROFILE_DIR = ROOT / 'patch_profiles'
-EXECUTABLE = 'Payload/LINE.app/LINE'
-PLIST = 'Payload/LINE.app/Info.plist'
 PROFILE_SCHEMA_VERSION = 2
 BUNDLE_IDENTIFIER = 'jp.naver.line'
 PROFILE_TYPE = 'line_patch'
@@ -1205,21 +1085,6 @@ def _reference_profile(profile_dir):
                     )
                 ),
             }
-
-    # Read the previous split reference once during migration; new profiles
-    # always carry the reference signatures inside the 26.14.0 profile.
-    legacy = profile_dir / 'keychain' / 'references' / (
-        'keychain-26.14.0-reference.json'
-    )
-    if legacy.exists():
-        document = json.loads(legacy.read_text(encoding='utf-8'))
-        signatures = document.get('e2ee_reference_signatures')
-        if signatures:
-            return {
-                'e2ee_reference_signatures': (
-                    _decode_e2ee_reference_instructions(signatures)
-                ),
-            }
     return None
 
 
@@ -1240,6 +1105,7 @@ def _validate_login_section(profile, executable):
     if (
         login.get('kind') != 'secondary_login_entry_branch' or
         file_offset != expected_offset or file_offset < 0 or
+        not image.text_address <= patch_va <= image.text_address + image.text_size - 4 or
         file_offset % 4 or patch_va % 4 or len(original) != 4 or
         patched != NOP.to_bytes(4, 'little') or
         executable[file_offset:file_offset + 4] != original
@@ -1311,65 +1177,7 @@ def analyze_friend_tab_executable(executable):
 
 def _validate_home_friends_section(profile, executable):
     home_friends = profile.get('home_friends')
-    if home_friends is None:
-        return
-    if (
-        not isinstance(home_friends, dict) or
-        home_friends.get('kind') != 'friend_tab_default_collapsed' or
-        home_friends.get('view_model') != 'LineHomeTab.FriendTabViewModel' or
-        home_friends.get('state_field') != 'isSectionExpanded' or
-        home_friends.get('friend_case') != 5 or
-        home_friends.get('manual_toggle_preserved') is not True or
-        not isinstance(home_friends.get('patches'), list) or
-        len(home_friends['patches']) != 2
-    ):
-        raise ValueError('Malformed combined profile Friends section.')
-    try:
-        offsets = [
-            int(patch['file_offset'], 16)
-            for patch in home_friends['patches']
-        ]
-        originals = [
-            bytes.fromhex(patch['original_hex'])
-            for patch in home_friends['patches']
-        ]
-        replacements = [
-            bytes.fromhex(patch['patched_hex'])
-            for patch in home_friends['patches']
-        ]
-    except (KeyError, TypeError, ValueError) as error:
-        raise ValueError('Malformed combined profile Friends patch sites.') from error
-
-    image = parse_arm64_macho(executable)
-    expected_original = struct.pack('<I', FRIEND_TAB_CASE_RESULT)
-    expected_replacement = struct.pack('<I', FRIEND_TAB_CASE_COLLAPSED)
-    if (
-        offsets != sorted(set(offsets)) or offsets[1] - offsets[0] != 16 or
-        any(
-            offset % 4 or
-            offset < image.text_offset or
-            offset + 4 > image.text_offset + image.text_size or
-            original != expected_original or
-            replacement != expected_replacement or
-            executable[offset:offset + 4] != original
-            for offset, original, replacement in zip(
-                offsets, originals, replacements,
-            )
-        )
-    ):
-        raise ValueError('Combined profile Friends instruction/layout mismatch.')
-
-    signature_offset = offsets[0] - 4
-    signature = struct.unpack_from('<6I', executable, signature_offset)
-    if (
-        signature[0] != FRIEND_TAB_CASE_COMPARE or
-        signature[1] != FRIEND_TAB_CASE_RESULT or
-        signature[2] & 0xFC000000 != 0x94000000 or
-        signature[3] & 0xFC000000 != 0x14000000 or
-        signature[4] != FRIEND_TAB_CASE_COMPARE or
-        signature[5] != FRIEND_TAB_CASE_RESULT or
-        analyze_friend_tab_executable(executable) != home_friends
-    ):
+    if home_friends is not None and analyze_friend_tab_executable(executable) != home_friends:
         raise ValueError(
             'Combined profile Friends signature is not a unique analyzed match.'
         )
@@ -1399,25 +1207,25 @@ def sticker_shop_native_code(native):
     return struct.pack('<14I', *words)
 
 
+def _words(image, address, count):
+    return struct.unpack(
+        f'<{count}I', _bounded(image.data, image.file_offset(address), count * 4, 'shop code'),
+    )
+
+
+def _call_target(image, address):
+    instruction, = _words(image, address, 1)
+    if instruction & 0xFC000000 != 0x94000000:
+        raise ValueError('Expected shop call.')
+    return _branch_target(address, instruction)
+
+
 def _analyze_native_sticker_routes(executable, image, liff_route):
-    def words(address, count):
-        return struct.unpack(
-            f'<{count}I', _bounded(executable, image.file_offset(address), count * 4, 'native shop'),
-        )
-
-    def call(address):
-        instruction, = words(address, 1)
-        if instruction & 0xFC000000 != 0x94000000:
-            raise ValueError('Expected native shop call.')
-        return address + (_sign_extend(instruction & 0x3FFFFFF, 26) << 2)
-
     def cases(resolver):
-        adrp, add = words(resolver + 20, 2)
+        adrp, add = _words(image, resolver + 20, 2)
         if adrp & 0x9F00001F != 0x90000000 or add & 0xFFC003FF != 0x91000000:
             raise ValueError('Expected shop string-switch table.')
-        immediate = ((adrp >> 5) & 0x7FFFF) << 2 | ((adrp >> 29) & 3)
-        address = ((resolver + 20) & ~0xFFF) + (_sign_extend(immediate, 21) << 12) + ((add >> 10) & 0xFFF)
-        offset = image.file_offset(address)
+        offset = image.file_offset(_adrp_add_target(resolver + 20, adrp, add))
         count, = struct.unpack('<Q', _bounded(executable, offset + 16, 8, 'shop cases'))
         if count not in (4, 10):
             raise ValueError('Unexpected shop string-switch size.')
@@ -1437,12 +1245,13 @@ def _analyze_native_sticker_routes(executable, image, liff_route):
         _, matcher_end = _function_bounds(matcher, image)
         candidates = [
             address for address in range(matcher_end, matcher_end + 0x400, 4)
-            if words(address, 1)[0] & 0xFC000000 == 0x94000000 and call(address) == matcher
+            if _words(image, address, 1)[0] & 0xFC000000 == 0x94000000 and
+            _call_target(image, address) == matcher
         ]
         if len(candidates) != 1:
             return None
         site = candidates[0]
-        signature = words(site, 16)
+        signature = _words(image, site, 16)
         if (
             signature[1] != 0x360003A0 or
             signature[4] != 0x9102C2C1 or
@@ -1452,24 +1261,24 @@ def _analyze_native_sticker_routes(executable, image, liff_route):
             signature[15] != 0x36000420
         ):
             return None
-        helper = call(site + 56)
-        helper_words = words(helper + 56, 7)
+        helper = _call_target(image, site + 56)
+        helper_words = _words(image, helper + 56, 7)
         if (
             helper_words[0] != 0xAA1303E0 or
             helper_words[2:4] != (0x12001C16, 0xAA1303E0) or
             helper_words[5:7] != (0x35000476, 0x12001C08)
         ):
             return None
-        kind = call(helper + 60)
-        command = call(helper + 72)
+        kind = _call_target(image, helper + 60)
+        command = _call_target(image, helper + 72)
         if (
-            call(kind + 16) != call(command + 16) or
-            words(kind + 52, 2) != (0x12001C00, 0x7100101F) or
-            words(kind + 72, 1) != (0x52800000,) or
-            words(command + 56, 2) != (0x12001C00, 0x7100281F) or
-            words(command + 76, 1) != (0x52800120,) or
-            cases(call(kind + 48)) != ['sticker', 'emoji', 'theme', 'accountRegist'] or
-            cases(call(command + 52)) != [
+            _call_target(image, kind + 16) != _call_target(image, command + 16) or
+            _words(image, kind + 52, 2) != (0x12001C00, 0x7100101F) or
+            _words(image, kind + 72, 1) != (0x52800000,) or
+            _words(image, command + 56, 2) != (0x12001C00, 0x7100281F) or
+            _words(image, command + 76, 1) != (0x52800120,) or
+            cases(_call_target(image, kind + 48)) != ['sticker', 'emoji', 'theme', 'accountRegist'] or
+            cases(_call_target(image, command + 52)) != [
                 'new', 'hot', 'event', 'category', 'author', 'detail',
                 'premium', 'download', 'preview', 'invalid',
             ]
@@ -1478,24 +1287,13 @@ def _analyze_native_sticker_routes(executable, image, liff_route):
 
         cave_offset = image.text_offset - 0x100
         cave_address = image.text_address - 0x100
-        command_end = 32 + struct.unpack_from('<I', executable, 20)[0]
+        # The cave must be zero-filled header padding inside an r-x __TEXT that
+        # maps the file header, leaving room for the injected load command.
         if (
-            cave_offset % 4 or command_end + 72 > cave_offset or
+            cave_offset % 4 or image.header_end + 72 > cave_offset or
+            image.file_offset(image.image_base) != 0 or image.text_protection != 5 or
             any(_bounded(executable, cave_offset, 0x100, 'shop code cave'))
         ):
-            return None
-        cursor = 32
-        executable_header = False
-        while cursor < command_end:
-            cmd, size = struct.unpack_from('<II', executable, cursor)
-            if size < 8 or cursor + size > command_end:
-                return None
-            if cmd == 0x19 and executable[cursor + 8:cursor + 24].rstrip(b'\0') == b'__TEXT':
-                file_offset, = struct.unpack_from('<Q', executable, cursor + 40)
-                protection, = struct.unpack_from('<I', executable, cursor + 60)
-                executable_header = file_offset == 0 and protection == 5
-            cursor += size
-        if not executable_header or cursor != command_end:
             return None
         guard = site + 44
         deny = guard + 0x60
@@ -1529,54 +1327,42 @@ def _analyze_sticker_liff_route(executable, image):
     if address - 136 < start or address + 132 > end:
         return None
 
-    def words(at, count):
-        return struct.unpack(
-            f'<{count}I', _bounded(executable, image.file_offset(at), count * 4, 'shop matcher'),
-        )
-
-    def call_target(at):
-        word, = words(at, 1)
-        if word & 0xFC000000 != 0x94000000:
-            raise ValueError('Expected shop matcher call.')
-        return at + (_sign_extend(word & 0x3FFFFFF, 26) << 2)
-
     def page_address(at, register):
-        adrp, add = words(at, 2)
+        adrp, add = _words(image, at, 2)
         if (
             adrp & 0x9F00001F != 0x90000000 | register or
             add & 0xFFC003FF != 0x91000000 | register << 5 | register
         ):
             raise ValueError('Expected shop matcher address.')
-        immediate = ((adrp >> 5) & 0x7FFFF) << 2 | ((adrp >> 29) & 3)
-        return (at & ~0xFFF) + (_sign_extend(immediate, 21) << 12) + ((add >> 10) & 0xFFF)
+        return _adrp_add_target(at, adrp, add)
 
     # The first app-ID match is sticker-only; retain the theme and shop matches.
-    delta = 0 if words(address + 120, 2) == (0x2A160268, 0x12000100) else 4
-    before = words(address - 132 - delta, 11)
+    delta = 0 if _words(image, address + 120, 2) == (0x2A160268, 0x12000100) else 4
+    before = _words(image, address - 132 - delta, 11)
     if (
         before[:4] != (0x528E0C37, 0x72A00E17, 0xD2FC6018, 0xA9026017) or
         before[5:7] != (0xA9400008, 0xA9030288) or
         (before[8] != 0xAA1403E0 if delta == 0 else before[8] & 0xFC000000 != 0x94000000) or
         before[10] != 0xAA0003F6 or
-        words(address - 44 - delta, 6) != (
+        _words(image, address - 44 - delta, 6) != (
             0xA9026017, 0xD1008108, 0xB2410108,
             0xD2800269, 0xF2FA0009, 0xA9032009,
         ) or
-        words(address + 84, 4) != (
+        _words(image, address + 84, 4) != (
             0x528D0E68, 0x72AE0DE8, 0xD2FC8009, 0xA9022408,
         ) or
-        words(address + 120 + delta, 2) != (0x2A160268, 0x12000100)
+        _words(image, address + 120 + delta, 2) != (0x2A160268, 0x12000100)
     ):
         return None
     try:
         if not (
-            call_target(address - 96 - delta) ==
-            call_target(address - 20) ==
-            call_target(address + 100 + delta)
+            _call_target(image, address - 96 - delta) ==
+            _call_target(image, address - 20) ==
+            _call_target(image, address + 100 + delta)
         ):
             return None
-        getter = call_target(address - 116 - delta)
-        if words(getter + 8, 1) != (0xD65F03C0,):
+        getter = _call_target(image, address - 116 - delta)
+        if _words(image, getter + 8, 1) != (0xD65F03C0,):
             return None
         string_address = page_address(getter, 0)
         length, raw = struct.unpack(
@@ -1622,9 +1408,9 @@ def _analyze_coin_entry(executable, image, gate):
             )
             if (
                 start == address - 40 and end == start + 76 and masked == expected and
-                start + 44 + (_sign_extend(words[11] & 0x3FFFFFF, 26) << 2) == gate
+                _branch_target(start + 44, words[11]) == gate
             ):
-                accessor = start + 32 + (_sign_extend(words[8] & 0x3FFFFFF, 26) << 2)
+                accessor = _branch_target(start + 32, words[8])
                 try:
                     accessor_bounds = _function_bounds(accessor, image)
                     metadata = struct.unpack(
@@ -1671,7 +1457,7 @@ def analyze_sticker_shop_executable(executable):
     for address in range(start, end, 4):
         word = struct.unpack_from('<I', executable, image.file_offset(address))[0]
         if word & 0xFC000000 == 0x94000000:
-            calls.append(address + (_sign_extend(word & 0x3FFFFFF, 26) << 2))
+            calls.append(_branch_target(address, word))
     if len(calls) != 2:
         return None
     gate = calls[-1]
@@ -1693,11 +1479,7 @@ def analyze_sticker_shop_executable(executable):
         not (words[20] & 0xFC000000 == 0x14000000 or words[20] == 0xA9447BFD)
     ):
         return None
-    immediate = ((words[10] >> 5) & 0x7FFFF) << 2 | ((words[10] >> 29) & 3)
-    table = (
-        ((gate + 40) & ~0xFFF) + (_sign_extend(immediate, 21) << 12) +
-        ((words[11] >> 10) & 0xFFF)
-    )
+    table = _adrp_add_target(gate + 40, words[10], words[11])
     table_offset = image.file_offset(table)
     if (
         table % 4 or table < gate + 84 or
@@ -1791,17 +1573,12 @@ def validate_profile(profile, info, executable, allow_unverified=False):
     _validate_keychain_section(profile, executable)
 
 
-def render_keychain_header(profile):
-    return render_c_header(profile)
-
-
 def _analyze(info, executable, profile_dir):
     version = info.get('CFBundleShortVersionString')
     build = info.get('CFBundleVersion')
     login_result = analyze_login_executable(
         executable, version=version, build=build,
     )
-    login_document = profile_document(login_result)
     keychain_result = analyze_keychain_executable(
         executable,
         version,
@@ -1822,7 +1599,7 @@ def _analyze(info, executable, profile_dir):
         'build': build,
         'architecture': 'arm64',
         'executable_sha256': hashlib.sha256(executable).hexdigest(),
-        'login_patch': login_document['patch'],
+        'login_patch': login_patch_section(login_result),
         'keychain': keychain_result,
     }
     home_friends = analyze_friend_tab_executable(executable)
@@ -1838,34 +1615,12 @@ def _write_profile(path, profile):
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         existing_text = path.read_text(encoding='utf-8')
-        existing = json.loads(existing_text)
-        if existing.get('profile_type') == PROFILE_TYPE:
-            canonical_existing = _canonicalize_profile_reference(existing)
-            if canonical_existing != profile:
-                upgraded = dict(canonical_existing)
-                if 'home_friends' in upgraded or 'home_friends' not in profile:
-                    raise ValueError(
-                        f'Combined patch profile already exists with different contents: {path}'
-                    )
-                upgraded['home_friends'] = profile['home_friends']
-                if upgraded != profile:
-                    raise ValueError(
-                        f'Combined patch profile already exists with different contents: {path}'
-                    )
-            if existing_text != serialized:
-                _atomic_write(path, serialized)
-            return path
-        expected = {
-            'version': profile['version'],
-            'build': profile['build'],
-            'executable_sha256': profile['executable_sha256'],
-            'bundle_identifier': BUNDLE_IDENTIFIER,
-        }
-        if any(existing.get(key) != value for key, value in expected.items()):
-            raise ValueError(f'Refusing to replace unrelated patch profile: {path}')
-        if existing.get('patch') != profile['login_patch']:
-            raise ValueError(f'Legacy login patch differs from analyzed patch: {path}')
-        _atomic_write(path, serialized)
+        if _canonicalize_profile_reference(json.loads(existing_text)) != profile:
+            raise ValueError(
+                f'Combined patch profile already exists with different contents: {path}'
+            )
+        if existing_text != serialized:
+            _atomic_write(path, serialized)
         return path
     try:
         with path.open('x', encoding='utf-8') as output:
@@ -1891,11 +1646,6 @@ def load_or_create_profile(
         if existing.get('profile_type') == PROFILE_TYPE:
             existing = _canonicalize_profile_reference(existing)
             validate_profile(existing, info, executable)
-            if 'home_friends' not in existing:
-                home_friends = analyze_friend_tab_executable(executable)
-                if home_friends is not None:
-                    existing['home_friends'] = home_friends
-                    validate_profile(existing, info, executable)
             _write_profile(path, existing)
             return existing, False
     if allow_unverified:

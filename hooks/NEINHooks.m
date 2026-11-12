@@ -2,6 +2,11 @@
 // This is app-private storage. It is NOT shared with app extensions.
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#include "NEINObjCRuntime.h"
+#if defined(NEIN_MULTI_KEYCHAIN_COMPAT) && !defined(NEIN_MULTI_DIAGNOSTICS)
+// NEINKeychainHooks.m reports through NEINDEmit from NEINLoginDiagnostics.m.
+#error "NEIN_MULTI_KEYCHAIN_COMPAT requires NEIN_MULTI_DIAGNOSTICS"
+#endif
 #ifdef NEIN_MULTI_ICON_PICKER
 #import <UIKit/UIKit.h>
 #include "NEINIconPicker.m"
@@ -12,9 +17,6 @@
 #endif
 #ifdef NEIN_MULTI_KEYCHAIN_COMPAT
 #include "NEINKeychainHooks.m"
-#endif
-#ifdef NEIN_MULTI_MESSAGE_DIAGNOSTICS
-#include "NEINMessageDiagnostics.m"
 #endif
 #if defined(NEIN_MULTI_REMOVE_ADS) || defined(NEIN_MULTI_HIDE_PROMOTIONAL_TABS)
 #include "NEINAdRemovalHooks.m"
@@ -69,29 +71,21 @@ static id NEINUnavailableVocabulary(id self, SEL selector) {
 }
 
 static void NEINInstallSiriCompat(void) {
-    Class vocabulary = NSClassFromString(@"INVocabulary");
-    Method method = vocabulary
-        ? class_getClassMethod(vocabulary, @selector(sharedVocabulary))
-        : NULL;
-    if (!method || method_getNumberOfArguments(method) != 2) return;
-    char returnType[16] = {0};
-    method_getReturnType(method, returnType, sizeof(returnType));
-    if (strcmp(returnType, "@") != 0) return;
-    method_setImplementation(method, (IMP)NEINUnavailableVocabulary);
+    NEINHookClassMethod(NSClassFromString(@"INVocabulary"), @selector(sharedVocabulary),
+                        "@", 2, NULL, NULL, (IMP)NEINUnavailableVocabulary, NULL);
 }
 
 static void NEINInstallContainerFallback(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        Method method = class_getInstanceMethod(NSFileManager.class,
-                        @selector(containerURLForSecurityApplicationGroupIdentifier:));
-        if (!method) {
-            NSLog(@"[NEINContainerCompat] Container method missing; fallback unavailable");
+        // Installed during image initialization, before the app's main() runs.
+        if (!NEINHook(NSFileManager.class,
+                      @selector(containerURLForSecurityApplicationGroupIdentifier:),
+                      "@", 3, "@", NULL, (IMP)NEINContainerURL,
+                      (IMP *)&NEINOriginalContainer)) {
+            NSLog(@"[NEINContainerCompat] Container method missing or changed; fallback unavailable");
             return;
         }
-        // Installed during image initialization, before the app's main() runs.
-        NEINOriginalContainer = (NEINContainerIMP)method_getImplementation(method);
-        method_setImplementation(method, (IMP)NEINContainerURL);
         NSLog(@"[NEINContainerCompat] v1 loaded; local fallback enabled for LINE groups");
     });
 }
@@ -114,22 +108,8 @@ __attribute__((constructor)) static void NEINHooksLoad(void) {
 #ifdef NEIN_MULTI_KEYCHAIN_COMPAT
             NEINInstallKeychainCompat();
 #endif
-#ifdef NEIN_MULTI_MESSAGE_DIAGNOSTICS
-            NEINInstallMessageDiagnostics();
-#endif
 #if defined(NEIN_MULTI_REMOVE_ADS) || defined(NEIN_MULTI_HIDE_PROMOTIONAL_TABS)
-            NEINInstallAdRemovalCompat(
-#ifdef NEIN_MULTI_REMOVE_ADS
-                YES,
-#else
-                NO,
-#endif
-#ifdef NEIN_MULTI_HIDE_PROMOTIONAL_TABS
-                YES
-#else
-                NO
-#endif
-            );
+            NEINInstallAdRemovalCompat();
 #endif
 #ifdef NEIN_MULTI_REMOVE_ADS
             NEINInstallAdNetworkBlock();

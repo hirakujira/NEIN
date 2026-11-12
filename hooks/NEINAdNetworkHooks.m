@@ -44,13 +44,13 @@ static NSError *NEINBlockedAdRequestError(NSURL *URL) {
 
 @end
 
+static NSArray<Class> *NEINWithAdProtocol(NSArray<Class> *classes) {
+    if ([classes containsObject:NEINAdBlockingURLProtocol.class]) return classes;
+    return [@[NEINAdBlockingURLProtocol.class] arrayByAddingObjectsFromArray:classes ?: @[]];
+}
+
 static void NEINInstallAdProtocol(NSURLSessionConfiguration *configuration) {
-    if (!configuration) return;
-    NSMutableArray<Class> *classes = [configuration.protocolClasses mutableCopy] ?: [NSMutableArray new];
-    if (![classes containsObject:NEINAdBlockingURLProtocol.class]) {
-        [classes insertObject:NEINAdBlockingURLProtocol.class atIndex:0];
-        configuration.protocolClasses = classes;
-    }
+    configuration.protocolClasses = NEINWithAdProtocol(configuration.protocolClasses);
 }
 
 static NEINConfigurationClassIMP NEINOriginalDefaultConfiguration;
@@ -70,11 +70,7 @@ static NSURLSessionConfiguration *NEINEphemeralConfiguration(id self, SEL select
 }
 
 static void NEINSetProtocolClasses(id self, SEL selector, NSArray<Class> *classes) {
-    NSMutableArray<Class> *updated = [classes mutableCopy] ?: [NSMutableArray new];
-    if (![updated containsObject:NEINAdBlockingURLProtocol.class]) {
-        [updated insertObject:NEINAdBlockingURLProtocol.class atIndex:0];
-    }
-    NEINOriginalSetProtocolClasses(self, selector, updated);
+    NEINOriginalSetProtocolClasses(self, selector, NEINWithAdProtocol(classes));
 }
 
 static NEINWKLoadRequestIMP NEINOriginalWKLoadRequest;

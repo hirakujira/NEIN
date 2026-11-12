@@ -21,15 +21,39 @@ static inline BOOL NEINMethodHasType(Method method, const char *returnType,
     return YES;
 }
 
-static inline BOOL NEINHookClassMethod(Class cls, SEL selector, const char *returnType,
-                                     unsigned argumentCount, const char *argument2,
-                                     const char *argument3, IMP replacement, IMP *original) {
-    Class meta = object_getClass(cls);
-    Method method = meta ? class_getInstanceMethod(meta, selector) : NULL;
+static inline BOOL NEINHook(Class cls, SEL selector, const char *returnType,
+                          unsigned argumentCount, const char *argument2,
+                          const char *argument3, IMP replacement, IMP *original) {
+    Method method = class_getInstanceMethod(cls, selector);
     if (!NEINMethodHasType(method, returnType, argumentCount, argument2, argument3)) {
         return NO;
     }
     if (original) *original = method_getImplementation(method);
     method_setImplementation(method, replacement);
     return YES;
+}
+
+// Replaces the method on cls only. An inherited implementation is shadowed by
+// an added method so the superclass and its other subclasses stay untouched.
+static inline BOOL NEINHookOwnMethod(Class cls, SEL selector, const char *returnType,
+                                   unsigned argumentCount, const char *argument2,
+                                   const char *argument3, IMP replacement, IMP *original) {
+    Method method = class_getInstanceMethod(cls, selector);
+    if (!NEINMethodHasType(method, returnType, argumentCount, argument2, argument3)) {
+        return NO;
+    }
+    IMP previous = method_getImplementation(method);
+    if (original) *original = previous;
+    const char *encoding = method_getTypeEncoding(method);
+    if (!class_addMethod(cls, selector, replacement, encoding)) {
+        method_setImplementation(method, replacement);
+    }
+    return YES;
+}
+
+static inline BOOL NEINHookClassMethod(Class cls, SEL selector, const char *returnType,
+                                     unsigned argumentCount, const char *argument2,
+                                     const char *argument3, IMP replacement, IMP *original) {
+    return NEINHook(object_getClass(cls), selector, returnType, argumentCount,
+                    argument2, argument3, replacement, original);
 }

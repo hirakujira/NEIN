@@ -51,23 +51,7 @@ static OSStatus NEINKPerform(unsigned op, CFDictionaryRef query, CFDictionaryRef
             NEINKProfileInUse->e2ee_sites,
             NEINKProfileInUse->e2ee_site_count, op, caller
         );
-    if (!authQuery && !e2eeCall) {
-#ifdef NEIN_MULTI_MESSAGE_DIAGNOSTICS
-        // Observe other failures without changing their query or result.
-        if (initial != errSecSuccess && NEINDBeginLogging()) {
-            NSString *key = [NSString stringWithFormat:@"keychain-%u-%d-%lx", op, (int)initial, (unsigned long)caller];
-            if (NEINDShouldEmitError(key, initial, @"")) {
-                static const char *names[] = {"add", "copy", "delete", "update"};
-                NEINDEmit([NSString stringWithFormat:@"[NEINLoginDiag] keychain-observe op=%s status=%d explicit-group=%d attribute-group=%d caller=LINE+0x%lx",
-                    names[op], (int)initial,
-                    query && CFDictionaryContainsKey(query, kSecAttrAccessGroup),
-                    attributes && CFDictionaryContainsKey(attributes, kSecAttrAccessGroup), (unsigned long)caller]);
-            }
-            NEINDEndLogging();
-        }
-#endif
-        return initial;
-    }
+    if (!authQuery && !e2eeCall) return initial;
     BOOL hasGroup = query && CFDictionaryContainsKey(query, kSecAttrAccessGroup);
     BOOL retried = NO;
     OSStatus finalStatus = initial;

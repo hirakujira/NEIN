@@ -232,7 +232,7 @@ static char NEINVisibleTabSourceOwnerKey;
     UITabBarItem *source = self.sourceItems[original];
     BOOL homeItem = NEINIsHomeTabTitle(source.title);
     if (!homeItem) [self.homeTapTimes removeAllObjects];
-    if (NEINVisibleTabIsPromotional(source) || !source.enabled) { [self update]; return; }
+    if (NEINIsPromotionalTabItem(source) || !source.enabled) { [self update]; return; }
     UITabBarController *controller = self.controller;
     UIViewController *destination = self.sourceControllers[original];
     id<UITabBarControllerDelegate> delegate = controller.delegate;

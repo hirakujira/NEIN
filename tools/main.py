@@ -22,8 +22,8 @@ import analyze_patch_profile
 import scan_ad_domains
 
 ROOT = Path(__file__).resolve().parents[1]
-EXECUTABLE = 'Payload/LINE.app/LINE'
-PLIST = 'Payload/LINE.app/Info.plist'
+EXECUTABLE = analyze_patch_profile.EXECUTABLE
+PLIST = analyze_patch_profile.PLIST
 NOP = bytes.fromhex('1f2003d5')
 LIB_NAME = 'NEINHooks.dylib'
 LIB_ENTRY = 'Payload/LINE.app/Frameworks/' + LIB_NAME
@@ -43,7 +43,6 @@ DEFAULT_BUNDLE_ID = 'kinta.ma.nein'
 DEFAULT_APP_NAME = 'NEIN'
 DEFAULT_ICON = 'design_simple_banana'
 AD_DOMAIN_LIST = ROOT / 'ad_domains.txt'
-PATCH_PROFILE_DIR = ROOT / 'patch_profiles'
 LC_BUILD_VERSION = 0x32
 PLATFORM_IOS = 2
 IPHONE_DUO_SDK = (27, 1, 0)
@@ -258,12 +257,8 @@ def extract_icon_previews(ipa_path, icon_names):
         catalog_path.write_bytes(catalog_data)
         names_path.write_text(json.dumps(icon_names), encoding='utf-8')
 
-        sdk = subprocess.check_output(
-            ['xcrun', '--sdk', 'macosx', '--show-sdk-path'], text=True,
-        ).strip()
         subprocess.run([
-            'xcrun', '--sdk', 'macosx', 'clang',
-            '-isysroot', sdk, '-fobjc-arc', '-fblocks',
+            'xcrun', '--sdk', 'macosx', 'clang', '-fobjc-arc', '-fblocks',
             '-framework', 'AppKit', '-framework', 'ImageIO',
             '-framework', 'UniformTypeIdentifiers',
             str(ROOT / 'tools' / 'extract_icon_previews.m'),
@@ -276,28 +271,13 @@ def extract_icon_previews(ipa_path, icon_names):
         return collect_icon_preview_assets(output_path, icon_names)
 
 
-def verify_profile_for_binary(profile, original):
-    image = analyze_patch_profile.parse_arm64_macho(original)
-    expected_offset = (
-        image.text_offset + profile.patch_va - image.text_address
-    )
-    if (
-        expected_offset != profile.patch_offset or
-        profile.patch_va < image.text_address or
-        profile.patch_va + 4 > image.text_address + image.text_size or
-        original[profile.patch_offset:profile.patch_offset + 4] != profile.original
-    ):
-        raise ValueError('Patch profile address, offset or instruction mismatch.')
-
-
-def find_profile(info, original, allow_unverified=False, profile_dir=None):
+def find_profile(info, original, allow_unverified=False):
+    # load_or_create_profile validates every section against this executable.
     document, _ = analyze_patch_profile.load_or_create_profile(
-        info, original,
-        PATCH_PROFILE_DIR if profile_dir is None else profile_dir,
-        allow_unverified=allow_unverified,
+        info, original, allow_unverified=allow_unverified,
     )
     patch = document['login_patch']
-    profile = PatchProfile(
+    return PatchProfile(
         version=document['version'],
         build=document['build'],
         executable_sha256=document['executable_sha256'],
@@ -309,43 +289,6 @@ def find_profile(info, original, allow_unverified=False, profile_dir=None):
         home_friends=document.get('home_friends'),
         sticker_shop=document.get('sticker_shop'),
     )
-    verify_profile_for_binary(profile, original)
-    return profile
-
-
-def select_profile(
-    info, original, auto_login_patch=False, allow_unverified=False,
-    profile_dir=None,
-):
-    if not auto_login_patch:
-        return find_profile(info, original, allow_unverified, profile_dir), None
-    profile, created = analyze_patch_profile.load_or_create_profile(
-        info, original,
-        PATCH_PROFILE_DIR if profile_dir is None else profile_dir,
-    )
-    patch = profile['login_patch']
-    profile = PatchProfile(
-        version=profile['version'],
-        build=profile['build'],
-        executable_sha256=profile['executable_sha256'],
-        patch_offset=int(patch['file_offset'], 16),
-        patch_va=int(patch['virtual_address'], 16),
-        original=bytes.fromhex(patch['original_hex']),
-        instruction=patch['instruction'],
-        keychain_profile=profile['keychain'],
-        home_friends=profile.get('home_friends'),
-        sticker_shop=profile.get('sticker_shop'),
-    )
-    analysis = {
-        'mode': 'analyzed_and_saved' if created else 'saved_profile',
-        'automatic_patch': True,
-        'patch_applied': True,
-        'profile_loaded': True,
-        'profile_version': profile.version,
-        'profile_build': profile.build,
-        'profile_created': created,
-    }
-    return profile, analysis
 
 
 def patched_binary(original, profile, verify_hash=True):
@@ -360,93 +303,62 @@ def patched_binary(original, profile, verify_hash=True):
     return bytes(result)
 
 
-def patch_friend_tab_default_collapsed(binary, profile):
-    if not isinstance(profile, dict) or not isinstance(profile.get('patches'), list):
-        raise ValueError('No analyzed Friends patch is available for this IPA.')
+def apply_patch_sites(binary, sites):
+    """Apply profile sites ({file_offset, original_hex, patched_hex}); return bytes and ranges."""
     result = bytearray(binary)
-    for patch in profile['patches']:
-        try:
-            offset = int(patch['file_offset'], 16)
-            original = bytes.fromhex(patch['original_hex'])
-            replacement = bytes.fromhex(patch['patched_hex'])
-        except (KeyError, TypeError, ValueError) as error:
-            raise ValueError('Malformed analyzed Friends patch site.') from error
-        if (
-            len(original) != 4 or len(replacement) != 4 or
-            offset < 0 or offset + 4 > len(binary) or
-            binary[offset:offset + 4] != original
-        ):
-            raise ValueError('Expected FriendTabViewModel initial expansion instruction not found.')
-        result[offset:offset + 4] = replacement
-    return bytes(result)
+    ranges = []
+    for site in sites:
+        offset = int(site['file_offset'], 16)
+        original = bytes.fromhex(site['original_hex'])
+        replacement = bytes.fromhex(site['patched_hex'])
+        end = offset + len(original)
+        if offset < 0 or len(replacement) != len(original) or result[offset:end] != original:
+            raise ValueError(f'Expected original instructions not found at {site["file_offset"]}.')
+        result[offset:end] = replacement
+        ranges.append((offset, end))
+    return bytes(result), ranges
 
 
-def patch_sticker_shop(binary, profile):
-    if not isinstance(profile, dict):
-        raise ValueError('No audited sticker-shop patch is available for this IPA.')
-    try:
-        native = profile['native_routes']
-        cave = native['code_cave']
-        sites = (profile, profile['liff_route'], native, cave, profile['coin_entry'])
-        patches = [
-            (int(site['file_offset'], 16), bytes.fromhex(site['original_hex']),
-             bytes.fromhex(site['patched_hex']))
-            for site in sites
-        ]
-        guard_address = int(native['guard_address'], 16)
-        cave_address = int(cave['address'], 16)
-        code = analyze_patch_profile.sticker_shop_native_code(native)
-        if (
-            int(native['deny_address'], 16) != guard_address + 0x60 or
-            guard_address - patches[2][0] != cave_address - patches[3][0]
-        ):
-            raise ValueError('Native sticker-shop addresses do not match.')
-        guard_branch = struct.pack('<I', analyze_patch_profile._branch26(guard_address, cave_address))
-    except (KeyError, TypeError, ValueError) as error:
-        raise ValueError('Malformed sticker-shop patch site.') from error
-    expected = ((b'\x10\0\0\0', b'\x20\0\0\0'),
-                (bytes.fromhex('96000037'), NOP),
-                (bytes.fromhex('15030036'), guard_branch), (bytes(len(code)), code),
-                (bytes.fromhex('60008052'), bytes.fromhex('00008052')))
-    ranges = sorted((offset, offset + len(original)) for offset, original, _ in patches)
-    if any(left[1] > right[0] for left, right in zip(ranges, ranges[1:])) or any(
-        offset < 0 or offset % 4 or offset + len(original) > len(binary) or
-        (original, replacement) != allowed or
-        binary[offset:offset + len(original)] != original
-        for (offset, original, replacement), allowed in zip(patches, expected)
-    ):
-        raise ValueError('Expected sticker-shop dispatch entry, LIFF branch or native guard not found.')
-    result = bytearray(binary)
-    for offset, original, replacement in patches:
-        result[offset:offset + len(original)] = replacement
-    return bytes(result)
+def load_commands(data):
+    """Return validated (cmd, offset, size) load commands of a thin 64-bit Mach-O."""
+    if len(data) < 32 or struct.unpack_from('<I', data, 0)[0] != 0xfeedfacf:
+        raise ValueError('Expected thin 64-bit Mach-O')
+    count, command_size = struct.unpack_from('<II', data, 16)
+    end = 32 + command_size
+    if end > len(data):
+        raise ValueError('Truncated Mach-O load commands')
+    commands = []
+    cursor = 32
+    for _ in range(count):
+        if cursor + 8 > end:
+            raise ValueError('Truncated Mach-O load command')
+        cmd, size = struct.unpack_from('<II', data, cursor)
+        if size < 8 or size % 8 or cursor + size > end:
+            raise ValueError('Invalid load-command layout')
+        commands.append((cmd, cursor, size))
+        cursor += size
+    if cursor != end:
+        raise ValueError('Load command size mismatch')
+    return commands
 
 
 def add_dylib(data):
-    if struct.unpack_from('<I', data, 0)[0] != 0xfeedfacf:
-        raise ValueError('Expected thin 64-bit Mach-O')
+    commands = load_commands(data)
     count, command_size = struct.unpack_from('<II', data, 16)
-    cursor = 32
+    cursor = 32 + command_size
     first_section = len(data)
-    for _ in range(count):
-        cmd, size = struct.unpack_from('<II', data, cursor)
-        if size < 8 or size % 8 or cursor + size > 32 + command_size:
-            raise ValueError('Invalid load-command layout')
+    for cmd, offset, size in commands:
         if cmd in (0xc, 0x80000018, 0x8000001f):
-            relative = struct.unpack_from('<I', data, cursor + 8)[0]
-            name = data[cursor + relative:cursor + size].split(b'\0')[0]
+            relative = struct.unpack_from('<I', data, offset + 8)[0]
+            name = data[offset + relative:offset + size].split(b'\0')[0]
             if name == LOAD_PATH.encode():
                 raise ValueError('Compatibility dylib already referenced')
         if cmd == 0x19:
-            sections = struct.unpack_from('<I', data, cursor + 64)[0]
+            sections = struct.unpack_from('<I', data, offset + 64)[0]
             for i in range(sections):
-                section = cursor + 72 + i * 80
-                off = struct.unpack_from('<I', data, section + 48)[0]
-                if off:
-                    first_section = min(first_section, off)
-        cursor += size
-    if cursor != 32 + command_size:
-        raise ValueError('Load command size mismatch')
+                section_offset = struct.unpack_from('<I', data, offset + 72 + i * 80 + 48)[0]
+                if section_offset:
+                    first_section = min(first_section, section_offset)
     raw = LOAD_PATH.encode() + b'\0'
     size = (24 + len(raw) + 7) & ~7
     command = struct.pack('<6I', 0xc, size, 24, 0, 0, 0) + raw
@@ -465,25 +377,14 @@ def macho_version(value):
 
 
 def patch_build_version_sdk(data):
-    if struct.unpack_from('<I', data, 0)[0] != 0xfeedfacf:
-        raise ValueError('Expected thin 64-bit Mach-O')
-    count, command_size = struct.unpack_from('<II', data, 16)
-    cursor = 32
-    build_versions = []
-    for _ in range(count):
-        cmd, size = struct.unpack_from('<II', data, cursor)
-        if size < 8 or size % 8 or cursor + size > 32 + command_size:
-            raise ValueError('Invalid load-command layout')
-        if cmd == LC_BUILD_VERSION:
-            if size < 24:
-                raise ValueError('Truncated LC_BUILD_VERSION load command')
-            build_versions.append(cursor)
-        cursor += size
-    if cursor != 32 + command_size:
-        raise ValueError('Load command size mismatch')
+    build_versions = [
+        (offset, size) for cmd, offset, size in load_commands(data) if cmd == LC_BUILD_VERSION
+    ]
     if len(build_versions) != 1:
         raise ValueError('Expected exactly one LC_BUILD_VERSION load command.')
-    offset = build_versions[0]
+    offset, size = build_versions[0]
+    if size < 24:
+        raise ValueError('Truncated LC_BUILD_VERSION load command')
     platform, minos, sdk = struct.unpack_from('<3I', data, offset + 8)
     if platform != PLATFORM_IOS:
         raise ValueError('LC_BUILD_VERSION platform is not iOS.')
@@ -506,22 +407,16 @@ def parse_args(argv=None):
     parser.add_argument('output', type=Path)
     parser.add_argument('--entry-only', action='store_true',
                         help='Only patch the secondary-login entry; do not compile or inject a compatibility dylib')
-    parser.add_argument('--auto-login-patch', action='store_true',
-                        help='Load or generate one combined exact-match patch profile; requires --entry-only')
     parser.add_argument('--primary-login', action='store_true',
                         help='Keep the original primary-phone login branch instead of applying the iPad secondary-login patch')
     parser.add_argument('--diagnostics', action='store_true',
                         help='Log error codes, selected localization keys, container results and LINE offsets')
     parser.add_argument('--keychain-compat', action='store_true',
                         help='Audited E2EE/authentication missing-entitlement retry with default Keychain group; includes diagnostics')
-    parser.add_argument('--message-diagnostics', action='store_true',
-                        help='Read-only post-login observations; includes current Keychain compatibility')
     parser.add_argument('--remove-ads', action='store_true',
                         help='Block audited ad domains and disable known ad views (verified on 26.14.0; experimental on 26.15.1)')
     parser.add_argument('--hide-promotional-tabs', action='store_true',
                         help='Hide VOOM, News, Shopping and Discover tab buttons (verified on 26.14.0; experimental on 26.15.1 and 26.17.0)')
-    parser.add_argument('--tab-diagnostics', action='store_true',
-                        help='Add a tab-only JSON export button; requires --hide-promotional-tabs')
     parser.add_argument('--collapse-friends-on-launch', action='store_true',
                         help='Initialize the Friends section as collapsed')
     parser.add_argument('--enable-sticker-shop', action='store_true',
@@ -533,14 +428,8 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if args.enable_sticker_shop and args.allow_unverified:
         parser.error('--enable-sticker-shop cannot be combined with --allow-unverified.')
-    if args.tab_diagnostics and not args.hide_promotional_tabs:
-        parser.error('--tab-diagnostics requires --hide-promotional-tabs.')
-    if args.message_diagnostics:
-        args.keychain_compat = True
     if args.keychain_compat:
         args.diagnostics = True
-    if args.auto_login_patch and not args.entry_only:
-        parser.error('--auto-login-patch requires --entry-only.')
     if args.entry_only and (args.diagnostics or args.remove_ads or
                             args.hide_promotional_tabs):
         parser.error('--entry-only cannot be combined with diagnostics, compatibility hooks, or ad removal.')
@@ -557,54 +446,53 @@ def parse_args(argv=None):
 def main():
     args = parse_args()
     with zipfile.ZipFile(args.input) as source:
-        if len(source.namelist()) != len(set(source.namelist())):
+        names = source.namelist()
+        if len(names) != len(set(names)):
             raise ValueError('Duplicate ZIP entry names are not supported.')
         original = source.read(EXECUTABLE)
+        original_sha256 = digest(original)
         info = plistlib.loads(source.read(PLIST))
-        profile, automatic_analysis = select_profile(
-            info, original, args.auto_login_patch, args.allow_unverified,
-        )
-        if args.collapse_friends_on_launch and profile.home_friends is None:
-            raise ValueError('No analyzed Friends patch is available for this IPA.')
+        profile = find_profile(info, original, args.allow_unverified)
+        patch_sites = []
+        if args.collapse_friends_on_launch:
+            if profile.home_friends is None:
+                raise ValueError('No analyzed Friends patch is available for this IPA.')
+            patch_sites += profile.home_friends['patches']
         if args.enable_sticker_shop:
-            if profile.sticker_shop is None:
+            shop = profile.sticker_shop
+            if shop is None:
                 raise ValueError('No audited sticker-shop patch is available for this IPA.')
-            if digest(original) != profile.executable_sha256:
+            if original_sha256 != profile.executable_sha256:
                 raise ValueError('Sticker-shop patch requires an exact executable SHA-256 match.')
-    output_info = patched_info_plist(
-        info, enable_icon_picker=not args.entry_only, iphone_duo=args.iphone_duo,
-    )
-    icon_preview_files = (
-        {} if args.entry_only else
-        extract_icon_previews(args.input, app_icon_names(info)[1])
-    )
-    build, lib_data = (
-        (None, None) if args.entry_only
-        else build_compat_dylib(args, info, original, profile)
-    )
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(args.input) as source:
-        names = source.namelist()
-        if (
-            len(names) != len(set(names)) or
-            (lib_data is not None and LIB_ENTRY in names) or
-            any(name in names for name in icon_preview_files)
-        ):
+            native = shop['native_routes']
+            patch_sites += [shop, shop['liff_route'], native, native['code_cave'], shop['coin_entry']]
+        output_info = patched_info_plist(
+            info, enable_icon_picker=not args.entry_only, iphone_duo=args.iphone_duo,
+        )
+        icon_names = app_icon_names(info)[1]
+        domains = load_ad_domains() if args.remove_ads else None
+        added_members = [] if args.entry_only else [
+            (name, content, 0o100644)
+            for name, content in extract_icon_previews(args.input, icon_names).items()
+        ]
+        build, lib_data = (
+            (None, None) if args.entry_only
+            else build_compat_dylib(args, info, profile, domains)
+        )
+        if lib_data is not None:
+            added_members.insert(0, (LIB_ENTRY, lib_data, 0o100755))
+        if any(name in names for name, _, _ in added_members):
             raise ValueError('Unexpected or duplicate archive member')
         entry_patched = (
             original if args.primary_login else
             patched_binary(original, profile, verify_hash=not args.allow_unverified)
         )
         modified, injection = (entry_patched, None) if args.entry_only else add_dylib(entry_patched)
-        if args.collapse_friends_on_launch:
-            modified = patch_friend_tab_default_collapsed(
-                modified, profile.home_friends,
-            )
-        if args.enable_sticker_shop:
-            modified = patch_sticker_shop(modified, profile.sticker_shop)
+        modified, optional_patch_ranges = apply_patch_sites(modified, patch_sites)
         modified, sdk_patch = (
             patch_build_version_sdk(modified) if args.iphone_duo else (modified, None)
         )
+        args.output.parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(args.output, 'x') as target:
             target.comment = source.comment
             for entry in source.infolist():
@@ -616,68 +504,37 @@ def main():
                     target.writestr(copy(entry), output_info)
                 else:
                     copy_archive_member(source, target, entry)
-            if lib_data is not None:
-                entry = zipfile.ZipInfo(LIB_ENTRY, (2026, 9, 15, 0, 0, 0))
-                entry.create_system = 3
-                entry.external_attr = 0o100755 << 16
-                entry.compress_type = zipfile.ZIP_DEFLATED
-                target.writestr(entry, lib_data)
-            for name, content in icon_preview_files.items():
+            for name, content, mode in added_members:
                 entry = zipfile.ZipInfo(name, (2026, 9, 15, 0, 0, 0))
                 entry.create_system = 3
-                entry.external_attr = 0o100644 << 16
+                entry.external_attr = mode << 16
                 entry.compress_type = zipfile.ZIP_DEFLATED
                 target.writestr(entry, content)
-    # Exclude stale signing/store metadata and embedded bundles whose IDs cannot
-    # remain valid after the main app is re-signed.
-    with zipfile.ZipFile(args.input) as source, zipfile.ZipFile(args.output) as target:
-        retained_names = retained_archive_members(source.namelist())
-        expected_names = (
-            retained_names +
-            ([LIB_ENTRY] if lib_data is not None else []) +
-            list(icon_preview_files)
-        )
-        if target.namelist() != expected_names:
-            raise AssertionError('Unexpected member layout')
-        for name in retained_names:
-            if name.endswith('/'):
-                continue
-            expected = (
-                BytesIO(modified) if name == EXECUTABLE else
-                BytesIO(output_info) if name == PLIST else
-                source.open(name)
-            )
-            with expected, target.open(name) as actual:
-                if not same_contents(expected, actual):
-                    raise AssertionError('Unexpected changed member: ' + name)
-        if lib_data is not None and target.read(LIB_ENTRY) != lib_data:
-            raise AssertionError('Dylib or ZIP verification failed')
-        for name, content in icon_preview_files.items():
-            if target.read(name) != content:
-                raise AssertionError('Icon preview archive mismatch: ' + name)
+        # Exclude stale signing/store metadata and embedded bundles whose IDs cannot
+        # remain valid after the main app is re-signed.
+        with zipfile.ZipFile(args.output) as target:
+            retained_names = retained_archive_members(names)
+            if target.namelist() != retained_names + [name for name, _, _ in added_members]:
+                raise AssertionError('Unexpected member layout')
+            for name in retained_names:
+                if name.endswith('/'):
+                    continue
+                expected = (
+                    BytesIO(modified) if name == EXECUTABLE else
+                    BytesIO(output_info) if name == PLIST else
+                    source.open(name)
+                )
+                with expected, target.open(name) as actual:
+                    if not same_contents(expected, actual):
+                        raise AssertionError('Unexpected changed member: ' + name)
+            for name, content, _ in added_members:
+                if target.read(name) != content:
+                    raise AssertionError('Added archive member mismatch: ' + name)
     expected_entry = profile.original if args.primary_login else NOP
     if modified[profile.patch_offset:profile.patch_offset + 4] != expected_entry:
         raise AssertionError('Login entry instruction differs from the selected mode.')
     start = int(injection['load_command_offset'], 16) if injection else 0
     end = start + injection['load_command_size'] if injection else 0
-    optional_patch_ranges = (
-        [
-            (
-                int(patch['file_offset'], 16),
-                int(patch['file_offset'], 16) + len(bytes.fromhex(patch['original_hex'])),
-            )
-            for patch in profile.home_friends['patches']
-        ]
-        if args.collapse_friends_on_launch else []
-    )
-    if args.enable_sticker_shop:
-        native = profile.sticker_shop['native_routes']
-        for patch in (
-            profile.sticker_shop, profile.sticker_shop['liff_route'],
-            native, native['code_cave'], profile.sticker_shop['coin_entry'],
-        ):
-            offset = int(patch['file_offset'], 16)
-            optional_patch_ranges.append((offset, offset + len(bytes.fromhex(patch['original_hex']))))
     if sdk_patch is not None:
         sdk_offset = int(sdk_patch['sdk_field_offset'], 16)
         if macho_version(struct.unpack_from('<I', modified, sdk_offset)[0]) != sdk_patch['patched_sdk']:
@@ -701,31 +558,26 @@ def main():
                 'secondary_login_patch_applied': not args.primary_login,
                 'version': profile.version,
                 'build': profile.build,
-                'automatic_login_analysis': automatic_analysis,
                 'minimum_ios': info['MinimumOSVersion'],
                 'keychain_compat': args.keychain_compat,
                 'allow_unverified': args.allow_unverified,
-                'executable_hash_verified': (
-                    digest(original) == profile.executable_sha256
-                ),
+                'executable_hash_verified': original_sha256 == profile.executable_sha256,
                 'source_bundle_identifier': info['CFBundleIdentifier'],
                 'bundle_identifier': DEFAULT_BUNDLE_ID,
                 'app_name': DEFAULT_APP_NAME,
                 'app_icon': DEFAULT_ICON,
                 'icon_picker_enabled': not args.entry_only,
-                'icon_count': 0 if args.entry_only else len(app_icon_names(info)[1]),
+                'icon_count': 0 if args.entry_only else len(icon_names),
                 'url_schemes_removed': True,
                 'source_signing_and_store_metadata_removed': True,
-                'message_diagnostics': args.message_diagnostics,
                 'remove_ads': args.remove_ads,
                 'hide_promotional_tabs': args.hide_promotional_tabs,
                 'collapse_friends_on_launch': args.collapse_friends_on_launch,
                 'enable_sticker_shop': args.enable_sticker_shop,
-                'tab_diagnostics': args.tab_diagnostics,
                 'iphone_duo': None,
                 'source_ipa_sha256': digest_file(args.input),
                 'output_ipa_sha256': digest_file(args.output),
-                'source_executable_sha256': digest(original), 'patched_executable_sha256': digest(modified),
+                'source_executable_sha256': original_sha256, 'patched_executable_sha256': digest(modified),
                 'dylib_sha256': digest(lib_data) if lib_data is not None else None, 'injection': injection,
                 'entry_patch_offset': hex(profile.patch_offset),
                 'allowed_group_ids': [] if args.entry_only else ['group.com.linecorp.line', 'group.share.com.linecorp.line'],
@@ -742,16 +594,7 @@ def main():
                                  'one dylib and verified icon preview assets were added; ZIP CRC passed; '
                                  'dylib ad hoc signature verified.')}
     if args.collapse_friends_on_launch:
-        manifest['home_friends'] = {
-            'mode': 'friend_tab_default_collapsed',
-            'view_model': 'LineHomeTab.FriendTabViewModel',
-            'state_field': 'isSectionExpanded',
-            'friend_case': 5,
-            'patch_offsets': [
-                patch['file_offset'] for patch in profile.home_friends['patches']
-            ],
-            'manual_toggle_preserved': True,
-        }
+        manifest['home_friends'] = profile.home_friends
     if args.enable_sticker_shop:
         manifest['sticker_shop'] = {
             **profile.sticker_shop,
@@ -824,7 +667,6 @@ def main():
             ),
         }
         if args.remove_ads:
-            domains = load_ad_domains()
             manifest['ad_removal']['blocked_domains'] = domains
             manifest['ad_removal']['blocked_domains_sha256'] = digest(
                 AD_DOMAIN_LIST.read_bytes()
@@ -880,75 +722,51 @@ def load_ad_domains(path=AD_DOMAIN_LIST):
     return domains
 
 
-def build_compat_dylib(args, info, original, patch_profile):
+def build_compat_dylib(args, info, patch_profile, domains):
+    features = (
+        (args.diagnostics, 'keychain-compat' if args.keychain_compat else 'diagnostics',
+         ['-DNEIN_MULTI_DIAGNOSTICS=1']),
+        (args.keychain_compat, None, ['-DNEIN_MULTI_KEYCHAIN_COMPAT=1', '-framework', 'Security']),
+        (args.remove_ads, 'noads', ['-DNEIN_MULTI_REMOVE_ADS=1', '-framework', 'WebKit']),
+        (args.hide_promotional_tabs, 'no-promotional-tabs', ['-DNEIN_MULTI_HIDE_PROMOTIONAL_TABS=1']),
+        (args.iphone_duo, 'iphone-duo', ['-DNEIN_MULTI_IPHONE_DUO=1']),
+        (args.primary_login, 'primary-login', []),
+    )
     build = ROOT / 'build'
-    build.mkdir(exist_ok=True)
-    build_labels = []
-    if args.diagnostics:
-        build_labels.append('keychain-compat' if args.keychain_compat else 'diagnostics')
-    if args.remove_ads:
-        build_labels.append('noads')
-    if args.hide_promotional_tabs:
-        build_labels.append('no-promotional-tabs')
-    if args.tab_diagnostics:
-        build_labels.append('tab-diagnostics')
-    if args.iphone_duo:
-        build_labels.append('iphone-duo')
-    if args.primary_login:
-        build_labels.append('primary-login')
-    if build_labels:
-        build = build / '-'.join(build_labels)
-        build.mkdir(exist_ok=True)
+    labels = [label for enabled, label, _ in features if enabled and label]
+    if labels:
+        build /= '-'.join(labels)
+    build.mkdir(parents=True, exist_ok=True)
     lib = build / LIB_NAME
-    domain_header = build / 'NEINAdDomains.h'
-    if args.remove_ads:
-        domains = load_ad_domains()
-        domain_header.write_text(scan_ad_domains.render_header(domains), encoding='utf-8')
+    if domains is not None:
+        (build / 'NEINAdDomains.h').write_text(scan_ad_domains.render_header(domains), encoding='utf-8')
     if args.keychain_compat:
         (build / 'NEINKeychainProfileData.h').write_text(
-            analyze_patch_profile.render_keychain_header(patch_profile.keychain_profile),
+            analyze_patch_profile.render_c_header(patch_profile.keychain_profile),
             encoding='utf-8',
         )
-    sdk = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
     subprocess.run(['xcrun', '--sdk', 'iphoneos', 'clang',
                     '-target', 'arm64-apple-ios' + info['MinimumOSVersion'],
-                    '-isysroot', sdk, '-fobjc-arc', '-fblocks', '-O2', '-Wall', '-Wextra',
-                    *(['-DNEIN_MULTI_DIAGNOSTICS=1'] if args.diagnostics else []),
-                    *(['-DNEIN_MULTI_KEYCHAIN_COMPAT=1', '-framework', 'Security'] if args.keychain_compat else []),
-                    *(['-DNEIN_MULTI_MESSAGE_DIAGNOSTICS=1'] if args.message_diagnostics else []),
-                    *(['-DNEIN_MULTI_REMOVE_ADS=1']
-                      if args.remove_ads else []),
-                    *(['-DNEIN_MULTI_HIDE_PROMOTIONAL_TABS=1']
-                      if args.hide_promotional_tabs else []),
-                    *(['-DNEIN_MULTI_TAB_DIAGNOSTICS=1']
-                      if args.tab_diagnostics else []),
-                    *(['-DNEIN_MULTI_IPHONE_DUO=1']
-                      if args.iphone_duo else []),
+                    '-fobjc-arc', '-fblocks', '-O2', '-Wall', '-Wextra',
+                    *(flag for enabled, _, flags in features if enabled for flag in flags),
                     '-DNEIN_MULTI_ICON_PICKER=1',
                     '-dynamiclib', '-framework', 'Foundation',
                     '-framework', 'UIKit', '-framework', 'CoreGraphics',
-                    *(['-framework', 'WebKit'] if args.remove_ads else []),
-                    *(['-I', str(build)]
-                      if args.remove_ads or args.keychain_compat else []),
+                    '-I', str(build),
                     '-Wl,-install_name,' + LOAD_PATH,
                     str(ROOT / 'hooks' / 'NEINHooks.m'), '-o', str(lib)], check=True)
     subprocess.run(['codesign', '--force', '--sign', '-', str(lib)], check=True)
     subprocess.run(['codesign', '--verify', '--strict', str(lib)], check=True)
     lib_data = lib.read_bytes()
     # The load command requests version 0.0.0, matching the dylib's LC_ID_DYLIB.
-    cursor = 32
-    identity_checked = False
-    for _ in range(struct.unpack_from('<I', lib_data, 16)[0]):
-        cmd, size = struct.unpack_from('<II', lib_data, cursor)
-        if cmd == 0xd:
-            relative, _, current, compatibility = struct.unpack_from('<4I', lib_data, cursor + 8)
-            name = lib_data[cursor + relative:cursor + size].split(b'\0')[0].decode()
-            if name != LOAD_PATH or current != 0 or compatibility != 0:
-                raise ValueError('Dylib identity/version differs from the injected load command')
-            identity_checked = True
-        cursor += size
-    if not identity_checked:
+    identities = [(offset, size) for cmd, offset, size in load_commands(lib_data) if cmd == 0xd]
+    if len(identities) != 1 or identities[0][1] < 24:
         raise ValueError('Dylib identity command missing')
+    offset, size = identities[0]
+    relative, _, current, compatibility = struct.unpack_from('<4I', lib_data, offset + 8)
+    name = lib_data[offset + relative:offset + size].split(b'\0')[0].decode()
+    if name != LOAD_PATH or current != 0 or compatibility != 0:
+        raise ValueError('Dylib identity/version differs from the injected load command')
     return build, lib_data
 
 
