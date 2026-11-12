@@ -39,13 +39,14 @@ def main(argv=None):
     app = args.app.resolve()
     output_dir = args.output_dir.resolve()
     info_path = app / 'Contents/Info.plist'
-    executable = app / 'Contents/MacOS/NEINLauncher'
     if not app.is_dir() or not info_path.is_file():
         raise ValueError('app must be a complete .app bundle')
-    if not executable.is_file():
-        raise ValueError('app must contain Contents/MacOS/NEINLauncher')
-
     info = plistlib.loads(info_path.read_bytes())
+    executable_name = info.get('CFBundleExecutable')
+    if not isinstance(executable_name, str) or Path(executable_name).name != executable_name:
+        raise ValueError('app must declare a valid CFBundleExecutable')
+    if not (app / 'Contents/MacOS' / executable_name).is_file():
+        raise ValueError('app is missing its declared executable')
     app_name = info.get('CFBundleDisplayName') or info.get('CFBundleName') or app.stem
     version = info.get('CFBundleShortVersionString', 'unknown')
     base_name = args.base_name or f'{app_name}-{version}'
