@@ -1190,21 +1190,40 @@ def _branch26(source, target, link=False):
     return (0x94000000 if link else 0x14000000) | ((delta >> 2) & 0x3FFFFFF)
 
 
-def sticker_shop_native_code(native):
+def _branch19(source, target, opcode, operand):
+    delta = target - source
+    if delta % 4 or not -(1 << 20) <= delta < (1 << 20):
+        raise ValueError('Shop patch branch is out of range.')
+    return opcode | ((delta >> 2) & 0x7FFFF) << 5 | operand
+
+
+def sticker_shop_native_code(native, allow_theme=False):
     cave = int(native['code_cave']['address'], 16)
     success = int(native['guard_address'], 16) + 4
     deny = int(native['deny_address'], 16)
     kind = int(native['kind_resolver_address'], 16)
     command = int(native['command_resolver_address'], 16)
-    # Preserve the normal result; secondary devices only reach valid sticker routes.
+    shift = 8 if allow_theme else 0
+    reject = cave + 48 + shift
+    # The analyzed kind switch returns the case index, so theme is 2 and the
+    # sticker default is 0; everything else keeps the original deny path.
+    kind_check = (
+        (0x7100081F, _branch19(cave + 24, cave + 32, 0x54000000, 0),
+         _branch19(cave + 28, reject, 0x35000000, 0))
+        if allow_theme else
+        (_branch19(cave + 20, reject, 0x35000000, 0),)
+    )
+    # Preserve the normal result; secondary devices only reach valid shop routes.
     words = (
         0x36000055, _branch26(cave + 4, success),
         0xA9BF7BFD, 0xAA1303E0, _branch26(cave + 16, kind, link=True),
-        0x350000E0, 0xAA1303E0, _branch26(cave + 28, command, link=True),
-        0x7100241F, 0x54000062, 0xA8C17BFD, _branch26(cave + 44, success),
-        0xA8C17BFD, _branch26(cave + 52, deny),
+        *kind_check,
+        0xAA1303E0, _branch26(cave + 28 + shift, command, link=True),
+        0x7100241F, _branch19(cave + 36 + shift, reject, 0x54000000, 2),
+        0xA8C17BFD, _branch26(cave + 44 + shift, success),
+        0xA8C17BFD, _branch26(cave + 52 + shift, deny),
     )
-    return struct.pack('<14I', *words)
+    return struct.pack(f'<{len(words)}I', *words)
 
 
 def _words(image, address, count):
@@ -1511,6 +1530,58 @@ def analyze_sticker_shop_executable(executable):
     }
 
 
+def analyze_theme_shop_executable(executable):
+    """Locate the theme-shop feature entry and the shop routes beside the sticker ones."""
+    shop = analyze_sticker_shop_executable(executable)
+    if shop is None:
+        return None
+    entry_offset = int(shop['file_offset'], 16) + 4
+    liff_offset = int(shop['liff_route']['file_offset'], 16) + 4
+    # The validated LIFF signature holds both app-ID guards; the second is the theme one.
+    if (
+        _bounded(executable, entry_offset, 4, 'theme feature dispatch') != b'\x10\0\0\0' or
+        _bounded(executable, liff_offset, 4, 'theme LIFF guard') != bytes.fromhex('77000037')
+    ):
+        return None
+    native = shop['native_routes']
+    code = sticker_shop_native_code(native, allow_theme=True)
+    return {
+        'kind': 'theme_shop_feature_gate',
+        'controller': shop['controller'],
+        'selector': shop['selector'],
+        'feature': 1,
+        'gate_address': shop['gate_address'],
+        'kind_case': 2,
+        'file_offset': hex(entry_offset),
+        'original_hex': '10000000',
+        'patched_hex': '20000000',
+        'liff_route': {
+            'kind': 'theme_liff_fallback',
+            'scheme': shop['liff_route']['scheme'],
+            'liff_id': shop['liff_route']['theme_liff_id'],
+            'file_offset': hex(liff_offset),
+            'original_hex': '77000037',
+            'patched_hex': NOP.to_bytes(4, 'little').hex(),
+        },
+        # Replaces the sticker-only code in the one shared cave; never applied with it.
+        'code_cave': {
+            'address': native['code_cave']['address'],
+            'file_offset': native['code_cave']['file_offset'],
+            'original_hex': bytes(len(code)).hex(),
+            'patched_hex': code.hex(),
+        },
+    }
+
+
+def _validate_theme_shop_section(profile, executable):
+    theme_shop = profile.get('theme_shop')
+    if theme_shop is not None and (
+        not isinstance(theme_shop, dict) or
+        analyze_theme_shop_executable(executable) != theme_shop
+    ):
+        raise ValueError('Combined profile theme-shop dispatch mismatch.')
+
+
 def _validate_sticker_shop_section(profile, executable):
     sticker_shop = profile.get('sticker_shop')
     if sticker_shop is not None and (
@@ -1570,6 +1641,7 @@ def validate_profile(profile, info, executable, allow_unverified=False):
     _validate_login_section(profile, executable)
     _validate_home_friends_section(profile, executable)
     _validate_sticker_shop_section(profile, executable)
+    _validate_theme_shop_section(profile, executable)
     _validate_keychain_section(profile, executable)
 
 

@@ -192,6 +192,57 @@ class StickerShopTests(unittest.TestCase):
                 {'sticker_shop': {**profile, 'liff_route': route}}, binary,
             )
 
+    def test_theme_section_adds_feature_one_entry_and_theme_liff_guard(self):
+        binary, image, methods = self.sample()
+        sticker = self.analyze(binary, image, methods)
+        with self.mocked(image, methods):
+            theme = analyzer.analyze_theme_shop_executable(binary)
+        self.assertEqual(theme['feature'], 1)
+        self.assertEqual(theme['file_offset'], '0x404')
+        self.assertEqual(theme['kind_case'], 2)
+        self.assertEqual(theme['liff_route']['file_offset'], '0x6cc')
+        self.assertEqual(theme['liff_route']['liff_id'], '1359301715-lw9jxjqV')
+        self.assertEqual(theme['code_cave']['file_offset'],
+                         sticker['native_routes']['code_cave']['file_offset'])
+        native = sticker['native_routes']
+        sites = [sticker, sticker['liff_route'], native, theme['code_cave'],
+                 sticker['coin_entry'], theme, theme['liff_route']]
+        patched, _ = main.apply_patch_sites(binary, sites)
+        self.assertEqual(struct.unpack_from('<2i', patched, 0x400), (32, 32))
+        self.assertEqual(patched[0x408:0x4E0], binary[0x408:0x4E0])
+        self.assertEqual(patched[0x500:0x540].hex(), theme['code_cave']['patched_hex'])
+        self.assertEqual(patched[0x540:0x6C8], binary[0x540:0x6C8])
+        self.assertEqual(patched[0x6C8:0x6D0], main.NOP * 2)
+        self.assertEqual(patched[0x6D0:0xC28], binary[0x6D0:0xC28])
+        with self.assertRaisesRegex(ValueError, 'Expected original'):
+            main.apply_patch_sites(patched, sites)
+
+    def test_theme_section_rejects_patched_entry_or_changed_theme_guard(self):
+        binary, image, methods = self.sample()
+        for offset in (0x404, 0x6CC):
+            altered = bytearray(binary)
+            struct.pack_into('<I', altered, offset, 32)
+            altered = bytes(altered)
+            with self.subTest(offset=hex(offset)),                     self.mocked(replace(image, data=altered), methods):
+                self.assertIsNone(analyzer.analyze_theme_shop_executable(altered))
+
+    def test_profile_cannot_redirect_theme_patch(self):
+        binary, image, methods = self.sample()
+        with self.mocked(image, methods):
+            theme = analyzer.analyze_theme_shop_executable(binary)
+            analyzer._validate_theme_shop_section({}, binary)
+            analyzer._validate_theme_shop_section({'theme_shop': theme}, binary)
+            for key, value in (
+                ('file_offset', '0x400'), ('feature', 0), ('kind_case', 0),
+                ('liff_route', {**theme['liff_route'], 'file_offset': '0x6c8'}),
+            ):
+                with self.subTest(key=key),                         self.assertRaisesRegex(ValueError, 'theme-shop dispatch mismatch'):
+                    analyzer._validate_theme_shop_section(
+                        {'theme_shop': {**theme, key: value}}, binary,
+                    )
+            with self.assertRaises(ValueError):
+                analyzer._validate_theme_shop_section({'theme_shop': []}, binary)
+
     def test_missing_ambiguous_or_instance_method_is_rejected(self):
         binary, image, methods = self.sample()
         for candidates in ([], methods * 2, [{**methods[0], 'is_class_method': False}]):
@@ -304,6 +355,31 @@ class NativeStickerRouteTests(unittest.TestCase):
         self.assertEqual(struct.unpack_from('<I', code)[0], 0x36000055)
         self.assertEqual(struct.unpack_from('<2I', code, 32), (0x7100241F, 0x54000062))
         self.assertEqual(binary, image.data)
+
+    def test_theme_code_cave_allows_the_theme_kind(self):
+        binary, image, route = self.sample()
+        native = analyzer._analyze_native_sticker_routes(binary, image, route)
+        cave = int(native['code_cave']['address'], 16)
+        success = int(native['guard_address'], 16) + 4
+        deny = int(native['deny_address'], 16)
+        code = analyzer.sticker_shop_native_code(native, allow_theme=True)
+        words = struct.unpack('<16I', code)
+
+        def conditional(index):
+            delta = (words[index] >> 5) & 0x7FFFF
+            delta -= 0x80000 if delta & 0x40000 else 0
+            return cave + index * 4 + delta * 4, words[index] & 0xFF00001F
+
+        self.assertEqual(code[:20], bytes.fromhex(native['code_cave']['patched_hex'])[:20])
+        self.assertEqual(words[5], 0x7100081F)
+        self.assertEqual(conditional(6), (cave + 32, 0x54000000))
+        self.assertEqual(conditional(7), (cave + 56, 0x35000000))
+        self.assertEqual(analyzer._branch_target(cave + 36, words[9]),
+                         int(native['command_resolver_address'], 16))
+        self.assertEqual(words[10], 0x7100241F)
+        self.assertEqual(conditional(11), (cave + 56, 0x54000002))
+        self.assertEqual(analyzer._branch_target(cave + 52, words[13]), success)
+        self.assertEqual(analyzer._branch_target(cave + 60, words[15]), deny)
 
     def test_changed_guard_types_commands_or_executable_padding_is_rejected(self):
         binary, image, route = self.sample()

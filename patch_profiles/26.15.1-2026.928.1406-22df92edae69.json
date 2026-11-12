@@ -174,5 +174,30 @@
     "patched_hex": "20000000",
     "selector": "canUseFeature:"
   },
+  "theme_shop": {
+    "code_cave": {
+      "address": "0x100007f00",
+      "file_offset": "0x7f00",
+      "original_hex": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "patched_hex": "55000036c7570e14fd7bbfa9e00313aa4f530e941f08007140000054e0000035e00313aae2510e941f24007162000054fd7bc1a8bb570e14fd7bc1a8d0570e14"
+    },
+    "controller": "UniversalFeatureController",
+    "feature": 1,
+    "file_offset": "0x744814",
+    "gate_address": "0x100744460",
+    "kind": "theme_shop_feature_gate",
+    "kind_case": 2,
+    "liff_route": {
+      "file_offset": "0x39dc68",
+      "kind": "theme_liff_fallback",
+      "liff_id": "1359301715-lw9jxjqV",
+      "original_hex": "77000037",
+      "patched_hex": "1f2003d5",
+      "scheme": "LineShopScheme"
+    },
+    "original_hex": "10000000",
+    "patched_hex": "20000000",
+    "selector": "canUseFeature:"
+  },
   "version": "26.15.1"
 }

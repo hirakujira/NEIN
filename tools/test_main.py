@@ -212,6 +212,59 @@ class MainToolTests(unittest.TestCase):
         for offset in ('0x140', '0x180', '0x188', '0x190', '0x194', '0x198', '0x19c'):
             self.assertIn(offset, manifest['changed_byte_offsets'])
 
+    def test_entry_only_theme_shop_replaces_the_sticker_code_cave(self):
+        original = bytearray(sample_macho())
+
+        def site(offset, original_hex, patched_hex):
+            original[offset:offset + len(original_hex) // 2] = bytes.fromhex(original_hex)
+            return {'file_offset': hex(offset), 'original_hex': original_hex,
+                    'patched_hex': patched_hex}
+
+        sticker_cave = site(0x140, '00' * 8, 'aa' * 8)
+        sticker_shop = {
+            **site(0x190, '10000000', '20000000'),
+            'liff_route': site(0x194, '96000037', '1f2003d5'),
+            'native_routes': {**site(0x198, '15030036', '2a000014'),
+                              'code_cave': sticker_cave},
+            'coin_entry': site(0x19c, '60008052', '00008052'),
+        }
+        theme_shop = {
+            **site(0x1a0, '10000000', '20000000'),
+            'liff_route': site(0x1a4, '77000037', '1f2003d5'),
+            'code_cave': site(0x140, '00' * 12, 'bb' * 12),
+        }
+        original = bytes(original)
+        profile = self.profile(original, sticker_shop=sticker_shop, theme_shop=theme_shop)
+        self.write_ipa(original, self.sample_info())
+        args = self.args('--entry-only', '--enable-theme-shop')
+        self.assertTrue(args.enable_sticker_shop)
+        manifest = self.run_main(args, profile)
+        expected = bytearray(main.patched_binary(original, profile))
+        for item in (sticker_shop, sticker_shop['liff_route'],
+                     sticker_shop['native_routes'], theme_shop['code_cave'],
+                     sticker_shop['coin_entry'], theme_shop, theme_shop['liff_route']):
+            offset = int(item['file_offset'], 16)
+            patched = bytes.fromhex(item['patched_hex'])
+            expected[offset:offset + len(patched)] = patched
+        with zipfile.ZipFile(args.output) as archive:
+            self.assertEqual(archive.read(main.EXECUTABLE), bytes(expected))
+        self.assertTrue(manifest['enable_theme_shop'])
+        self.assertTrue(manifest['enable_sticker_shop'])
+        self.assertEqual(manifest['theme_shop']['liff_route'], theme_shop['liff_route'])
+        self.assertEqual(manifest['theme_shop']['code_cave'], theme_shop['code_cave'])
+        for offset in ('0x140', '0x14b', '0x1a0', '0x1a4'):
+            self.assertIn(offset, manifest['changed_byte_offsets'])
+
+    def test_theme_shop_refuses_missing_profile_section_before_writing(self):
+        original = sample_macho()
+        self.write_ipa(original, self.sample_info())
+        profile = self.profile(original, sticker_shop={'native_routes': {}}, theme_shop=None)
+        args = self.args('--entry-only', '--enable-theme-shop')
+        with self.assertRaisesRegex(ValueError, 'theme-shop patch'):
+            self.run_main(args, profile)
+        self.assertFalse(args.output.exists())
+        self.assertFalse(args.output.with_suffix('.manifest.json').exists())
+
     def test_sticker_shop_refuses_missing_profile_or_hash_before_writing(self):
         original = sample_macho()
         self.write_ipa(original, self.sample_info())
@@ -474,7 +527,8 @@ class MainToolTests(unittest.TestCase):
 
     def test_options_are_opt_in(self):
         for flag in ('--remove-ads', '--hide-promotional-tabs', '--primary-login',
-                     '--collapse-friends-on-launch', '--enable-sticker-shop', '--iphone-duo'):
+                     '--collapse-friends-on-launch', '--enable-sticker-shop',
+                     '--enable-theme-shop', '--iphone-duo'):
             attribute = flag[2:].replace('-', '_')
             with self.subTest(flag=flag):
                 self.assertFalse(getattr(self.args(), attribute))
@@ -486,6 +540,7 @@ class MainToolTests(unittest.TestCase):
     def test_rejects_incompatible_options(self):
         for flags in (
             ('--enable-sticker-shop', '--allow-unverified'),
+            ('--enable-theme-shop', '--allow-unverified'),
             ('--entry-only', '--primary-login'),
             ('--entry-only', '--remove-ads'),
             ('--entry-only', '--keychain-compat'),
