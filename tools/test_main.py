@@ -658,6 +658,7 @@ class MainToolTests(unittest.TestCase):
                 })
                 self.assertEqual(section['split_layout']['device_model'], 'iPhone19,4')
                 self.assertEqual(section['split_layout']['minimum_window_short_side_points'], 600)
+                self.assertIn('LineCameraSubsystem.CameraView', section['camera_layout_hook'])
 
     def test_skin_default_json_prefixes_only_shipped_images(self):
         source_id = '00000000-0000-0000-0000-000000000002'

@@ -29,6 +29,21 @@ class PromotionalTabsTests(unittest.TestCase):
     def test_duo_split_layout_with_view_doubles(self):
         self.compile_and_run(Path(__file__).with_name('test_duo_split_layout.m'))
 
+    def test_duo_camera_layout_with_catalyst_uikit(self):
+        sdk = subprocess.run(['xcrun', '--sdk', 'macosx', '--show-sdk-path'], check=True,
+                             capture_output=True, text=True).stdout.strip()
+        frameworks = sdk + '/System/iOSSupport/System/Library/Frameworks'
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / 'camera-tests'
+            subprocess.run([
+                'xcrun', '--sdk', 'macosx', 'clang', '-target', 'arm64-apple-ios18.0-macabi',
+                '-iframework', frameworks, '-F', frameworks, '-fobjc-arc',
+                '-Wall', '-Wextra', '-Werror', '-framework', 'Foundation',
+                '-framework', 'CoreGraphics', '-framework', 'UIKit', '-framework', 'QuartzCore',
+                str(Path(__file__).with_name('test_duo_camera_layout.m')), '-o', str(executable),
+            ], check=True)
+            subprocess.run([str(executable)], check=True)
+
     def compile_and_run(self, source, skin=False, settings='today'):
         with tempfile.TemporaryDirectory() as directory:
             executable = Path(directory) / 'tab-tests'

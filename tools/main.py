@@ -682,6 +682,11 @@ def main():
                     "controller's horizontal size class to regular on wide windows."
                 ),
             },
+            'camera_layout_hook': (
+                '-[LineCameraSubsystem.CameraView layoutSubviews] caps the 16:9 preview '
+                'above the mode bar inside the safe area; -[YukiCameraView layoutSubviews] '
+                'keeps its Metal layer sized to its bounds after fold and rotation.'
+            ),
             'scope': (
                 'Every iOS 27 device applies iOS 27.1 SDK UIKit behavior to this build '
                 '(for example zero default UIView layout margins); the two-column layout '
@@ -963,7 +968,7 @@ def build_compat_dylib(args, info, patch_profile, domains):
         (args.remove_ads, 'noads', ['-DNEIN_MULTI_REMOVE_ADS=1', '-framework', 'WebKit']),
         (args.hide_promotional_tabs, 'no-promotional-tabs', ['-DNEIN_MULTI_HIDE_PROMOTIONAL_TABS=1']),
         (args.skin_theme, 'skin-themes', ['-DNEIN_MULTI_SKIN_THEME=1']),
-        (args.iphone_duo, 'iphone-duo', ['-DNEIN_MULTI_IPHONE_DUO=1']),
+        (args.iphone_duo, 'iphone-duo', ['-DNEIN_MULTI_IPHONE_DUO=1', '-framework', 'QuartzCore']),
         (args.primary_login, 'primary-login', []),
     )
     build = ROOT / 'build'
