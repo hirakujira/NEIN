@@ -6,6 +6,119 @@ static BOOL NEINIsSettingsTabItem(UITabBarItem *item) {
         @[@"SETTINGS", @"設定", @"设置", @"設置", @"설정"]);
 }
 
+#ifdef NEIN_MULTI_SKIN_THEME
+#import "NEINThemeConfig.h"
+
+static CGImageRef NEINCreateTrimmedTabImage(CGImageRef source) {
+    if (!source) return NULL;
+    size_t width = CGImageGetWidth(source), height = CGImageGetHeight(source);
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    if (!space) return NULL;
+    CGContextRef context = CGBitmapContextCreate(NULL, width, height, 8, 0, space,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(space);
+    if (!context) return NULL;
+    CGContextDrawImage(context, CGRectMake(0, 0, width, height), source);
+    const uint8_t *pixels = CGBitmapContextGetData(context);
+    size_t stride = CGBitmapContextGetBytesPerRow(context);
+    size_t left = width, top = height, right = 0, bottom = 0;
+    for (size_t y = 0; y < height; y++) {
+        for (size_t x = 0; x < width; x++) {
+            if (!pixels[y * stride + x * 4 + 3]) continue;
+            left = MIN(left, x); top = MIN(top, y);
+            right = MAX(right, x + 1); bottom = MAX(bottom, y + 1);
+        }
+    }
+    CGImageRef trimmed = NULL;
+    if (right > left && bottom > top) {
+        CGImageRef normalized = CGBitmapContextCreateImage(context);
+        if (normalized) {
+            trimmed = CGImageCreateWithImageInRect(normalized,
+                CGRectMake(left, top, right - left, bottom - top));
+            CGImageRelease(normalized);
+        }
+    }
+    CGContextRelease(context);
+    return trimmed;
+}
+
+static UIImage *NEINSkinTabImage(UITabBarItem *item, BOOL selected, UITraitCollection *traits, CGSize slot) {
+    id manager = NSClassFromString(@"_TtC17LineSharedUITheme17StylesheetManager");
+    if (![manager respondsToSelector:@selector(sharedManager)]) return nil;
+    manager = [manager performSelector:@selector(sharedManager)];
+    if (![manager respondsToSelector:@selector(currentStylesheet)]) return nil;
+    id sheet = [manager performSelector:@selector(currentStylesheet)];
+    if (![sheet respondsToSelector:@selector(productID)] ||
+        ![sheet respondsToSelector:@selector(isDefaultStylesheet)]) return nil;
+    NSString *productID = [sheet performSelector:@selector(productID)];
+    if (![[sheet valueForKey:@"isDefaultStylesheet"] boolValue] &&
+        ![productID isEqualToString:[NSString stringWithUTF8String:NEINSkinThemeTarget]]) return nil;
+
+    NSString *role = nil;
+    if (NEINIsHomeTabTitle(item.title)) role = @"home";
+    else if (NEINTabTitleIsOneOf(item.title, @[@"CHAT", @"CHATS", @"聊天", @"トーク", @"채팅"])) role = @"chat";
+    else if (NEINTabTitleIsOneOf(item.title, @[@"CALL", @"CALLS", @"通話", @"통화"])) role = @"call";
+    else if (NEINIsSettingsTabItem(item)) role = @"setting";
+    if (!role) return nil;
+
+    // The default stylesheet is reskinned, but LINE's default-tab generator bypasses its artwork.
+    static NSDictionary *rules;
+    static NSCache *images;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSData *data = [NSData dataWithContentsOfURL:[NSBundle.mainBundle URLForResource:@"default" withExtension:@"json"]];
+        id json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
+        if ([json isKindOfClass:NSDictionary.class]) rules = json;
+        images = [NSCache new];
+    });
+    NSArray<NSString *> *styles = [role isEqualToString:@"setting"]
+        ? @[@"liquid.tabBar.today", @"line.tabBar.today",
+            @"liquid.tabBar.voom", @"line.tabBar.voom",
+            @"liquid.tabBar.wallet", @"line.tabBar.wallet"]
+        : @[[@"liquid.tabBar." stringByAppendingString:role],
+            [@"line.tabBar." stringByAppendingString:role]];
+    for (NSString *style in styles) {
+        id rule = rules[style];
+        if (![rule isKindOfClass:NSDictionary.class]) continue;
+        id states = rule[@"icon.image"];
+        if (![states isKindOfClass:NSDictionary.class]) continue;
+        id name = states[selected ? @"selected" : @"normal"];
+        if ([name isKindOfClass:NSDictionary.class]) {
+            name = name[traits.userInterfaceStyle == UIUserInterfaceStyleDark ? @"dark" : @"light"];
+        }
+        if (![name isKindOfClass:NSString.class]) continue;
+        NSString *cacheKey = [NSString stringWithFormat:@"%@:%g:%g:%ld", name,
+            slot.width, slot.height, (long)traits.userInterfaceStyle];
+        UIImage *cached = [images objectForKey:cacheKey];
+        if (cached) return cached;
+        UIImage *image = [UIImage imageNamed:name inBundle:NSBundle.mainBundle compatibleWithTraitCollection:traits];
+        if (!image) continue;
+        if ([style hasPrefix:@"line.tabBar."]) {
+            // Legacy artwork includes the old bar's transparent title area.
+            CGImageRef trimmed = NEINCreateTrimmedTabImage(image.CGImage);
+            if (trimmed) {
+                image = [UIImage imageWithCGImage:trimmed scale:image.scale orientation:image.imageOrientation];
+                CGImageRelease(trimmed);
+            }
+        }
+        if (slot.width > 0 && slot.height > 0 &&
+            (image.size.width > slot.width || image.size.height > slot.height)) {
+            // Legacy tab art is taller than the Liquid Glass icon slot.
+            CGFloat scale = MIN(slot.width / image.size.width, slot.height / image.size.height);
+            CGSize size = CGSizeMake(image.size.width * scale, image.size.height * scale);
+            image = [[[UIGraphicsImageRenderer alloc] initWithSize:size] imageWithActions:^(UIGraphicsImageRendererContext *context) {
+                (void)context;
+                [image drawInRect:(CGRect){CGPointZero, size}];
+            }];
+        }
+        image = [image imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+        [images setObject:image forKey:cacheKey];
+        return image;
+    }
+    return nil;
+}
+#endif
+
 static char NEINVisibleTabBarKey;
 static char NEINVisibleTabSourceOwnerKey;
 
@@ -68,6 +181,13 @@ static char NEINVisibleTabSourceOwnerKey;
 // LINE adds its own settings tab once settings has been opened, but leaves
 // that item without artwork. Show the gear there instead of a blank slot.
 - (UIImage *)imageForSourceItem:(UITabBarItem *)item selected:(BOOL)selected {
+#ifdef NEIN_MULTI_SKIN_THEME
+    CGSize slot = NEINIsSettingsTabItem(item)
+        ? self.controller.tabBar.items.firstObject.image.size : item.image.size;
+    UIImage *skin = NEINSkinTabImage(item, selected, self.bar.traitCollection, slot);
+    if (skin) return skin;
+    if (item == self.settingsItem) return [UIImage systemImageNamed:selected ? @"gearshape.fill" : @"gearshape"];
+#endif
     if (item.image || !NEINIsSettingsTabItem(item)) return selected ? item.selectedImage : item.image;
     return selected ? self.settingsItem.selectedImage : self.settingsItem.image;
 }
@@ -139,6 +259,12 @@ static char NEINVisibleTabSourceOwnerKey;
         }
         if (!valid) { [self deactivate]; return; }
         if (!self.settingsItem) self.settingsItem = [self newSettingsItem];
+#ifdef NEIN_MULTI_SKIN_THEME
+        UIImage *settingsImage = [self imageForSourceItem:self.settingsItem selected:NO];
+        UIImage *settingsSelectedImage = [self imageForSourceItem:self.settingsItem selected:YES];
+        if (self.settingsItem.image != settingsImage) self.settingsItem.image = settingsImage;
+        if (self.settingsItem.selectedImage != settingsSelectedImage) self.settingsItem.selectedImage = settingsSelectedImage;
+#endif
         BOOL hasNativeSettings = NO;
         for (NSNumber *index in indices) {
             if (NEINIsSettingsTabItem(items[index.unsignedIntegerValue])) {

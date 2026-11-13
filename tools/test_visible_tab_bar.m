@@ -34,21 +34,101 @@
 }
 @end
 
-@interface UIImage : NSObject
-+ (instancetype)systemImageNamed:(NSString *)name;
+enum { UIUserInterfaceStyleLight = 1, UIUserInterfaceStyleDark = 2 };
+enum { UIImageRenderingModeAlwaysOriginal = 1 };
+@interface UITraitCollection : NSObject
+@property NSInteger userInterfaceStyle;
 @end
+@implementation UITraitCollection @end
+
+@interface UIImage : NSObject
+@property(copy) NSString *name;
+@property CGSize size;
+@property(readonly) CGImageRef CGImage;
+@property(readonly) CGFloat scale;
+@property(readonly) NSInteger imageOrientation;
++ (instancetype)systemImageNamed:(NSString *)name;
++ (instancetype)imageNamed:(NSString *)name inBundle:(NSBundle *)bundle compatibleWithTraitCollection:(UITraitCollection *)traits;
++ (instancetype)imageWithCGImage:(CGImageRef)image scale:(CGFloat)scale orientation:(NSInteger)orientation;
+- (instancetype)imageWithRenderingMode:(NSInteger)mode;
+- (void)drawInRect:(CGRect)rect;
+@end
+static UIImage *drawnImage;
 @implementation UIImage
+- (instancetype)init {
+    if ((self = [super init])) _size = CGSizeMake(40, 28);
+    return self;
+}
 + (instancetype)systemImageNamed:(NSString *)name {
-    (void)name;
-    return [self new];
+    UIImage *image = [self new]; image.name = name;
+    return image;
+}
++ (instancetype)imageNamed:(NSString *)name inBundle:(NSBundle *)bundle compatibleWithTraitCollection:(UITraitCollection *)traits {
+    (void)bundle; (void)traits;
+    if (![name hasPrefix:@"skin-"]) return nil;
+    static NSMutableDictionary *images;
+    if (!images) images = [NSMutableDictionary new];
+    if (!images[name]) {
+        UIImage *image = [self new]; image.name = name; images[name] = image;
+        if ([name hasPrefix:@"skin-call"]) image.size = CGSizeMake(64, 75);
+    }
+    return images[name];
+}
+- (instancetype)imageWithRenderingMode:(NSInteger)mode { (void)mode; return self; }
+- (CGImageRef)CGImage { return NULL; }
+- (CGFloat)scale { return 2; }
+- (NSInteger)imageOrientation { return 0; }
++ (instancetype)imageWithCGImage:(CGImageRef)cgImage scale:(CGFloat)scale orientation:(NSInteger)orientation {
+    (void)orientation;
+    UIImage *image = [self new];
+    image.size = CGSizeMake(CGImageGetWidth(cgImage) / scale, CGImageGetHeight(cgImage) / scale);
+    return image;
+}
+- (void)drawInRect:(CGRect)rect { (void)rect; drawnImage = self; }
+@end
+@interface UIGraphicsImageRendererContext : NSObject @end
+@implementation UIGraphicsImageRendererContext @end
+@interface UIGraphicsImageRenderer : NSObject
+@property CGSize size;
+- (instancetype)initWithSize:(CGSize)size;
+- (UIImage *)imageWithActions:(void (^)(UIGraphicsImageRendererContext *))actions;
+@end
+@implementation UIGraphicsImageRenderer
+- (instancetype)initWithSize:(CGSize)size {
+    if ((self = [super init])) _size = size;
+    return self;
+}
+- (UIImage *)imageWithActions:(void (^)(UIGraphicsImageRendererContext *))actions {
+    drawnImage = nil; actions(nil);
+    UIImage *image = [UIImage new]; image.name = drawnImage.name; image.size = self.size;
+    return image;
 }
 @end
+
+#ifdef NEIN_MULTI_SKIN_THEME
+@interface TestStylesheet : NSObject
+@property(copy) NSString *productID;
+@property BOOL isDefaultStylesheet;
+@end
+@implementation TestStylesheet @end
+@interface _TtC17LineSharedUITheme17StylesheetManager : NSObject
+@property(strong) TestStylesheet *currentStylesheet;
++ (instancetype)sharedManager;
+@end
+@implementation _TtC17LineSharedUITheme17StylesheetManager
++ (instancetype)sharedManager {
+    static id manager;
+    if (!manager) manager = [self new];
+    return manager;
+}
+@end
+#endif
 
 @interface UITabBarItem : NSObject
 @property(copy) NSString *title;
 @property(copy) NSString *accessibilityLabel;
-@property(strong) id image;
-@property(strong) id selectedImage;
+@property(strong) UIImage *image;
+@property(strong) UIImage *selectedImage;
 @property(copy) NSString *badgeValue;
 @property(strong) id badgeColor;
 @property BOOL enabled;
@@ -68,6 +148,7 @@
 @end
 enum { UITabBarItemPositioningFill = 1 };
 @interface UITabBar : UIView
+@property(strong) UITraitCollection *traitCollection;
 @property(nonatomic, weak) id<UITabBarDelegate> delegate;
 @property NSInteger itemPositioning;
 @property(copy) NSArray<UITabBarItem *> *items;
@@ -146,7 +227,7 @@ int main(void) {
         [root addSubview:controller.tabBar];
         NSMutableArray *items = [NSMutableArray new], *controllers = [NSMutableArray new];
         for (NSString *title in @[@"首頁", @"聊天", @"VOOM", @"通話"]) {
-            UITabBarItem *item = [[UITabBarItem alloc] initWithTitle:title image:[NSObject new] selectedImage:nil];
+            UITabBarItem *item = [[UITabBarItem alloc] initWithTitle:title image:[UIImage new] selectedImage:nil];
             UIViewController *vc = [title isEqualToString:@"聊天"]
                 ? [UINavigationController new] : [UIViewController new];
             vc.tabBarItem = item;
@@ -282,7 +363,7 @@ int main(void) {
         NSMutableArray *threeTabControllers = [NSMutableArray new];
         for (NSString *title in @[@"主頁", @"聊天", @"通話"]) {
             UITabBarItem *item = [[UITabBarItem alloc] initWithTitle:title
-                image:[NSObject new] selectedImage:nil];
+                image:[UIImage new] selectedImage:nil];
             UIViewController *viewController = [UIViewController new];
             viewController.tabBarItem = item;
             [threeTabItems addObject:item];
@@ -322,7 +403,7 @@ int main(void) {
         NSMutableArray *nativeControllers = [NSMutableArray new];
         for (NSString *title in @[@"主頁", @"聊天", @"VOOM", @"通話", @"設定"]) {
             UITabBarItem *item = [[UITabBarItem alloc] initWithTitle:title
-                image:[NSObject new] selectedImage:nil];
+                image:[UIImage new] selectedImage:nil];
             UIViewController *viewController = [UIViewController new];
             viewController.tabBarItem = item;
             [nativeItems addObject:item];
@@ -374,7 +455,7 @@ int main(void) {
         NSMutableArray *discoverControllers = [NSMutableArray new];
         for (NSString *title in @[@"主頁", @"聊天", @"逛逛", @"VOOM", @"通話"]) {
             UITabBarItem *item = [[UITabBarItem alloc] initWithTitle:title
-                image:[NSObject new] selectedImage:nil];
+                image:[UIImage new] selectedImage:nil];
             UIViewController *viewController = [UIViewController new];
             viewController.tabBarItem = item;
             [discoverItems addObject:item];
@@ -395,6 +476,80 @@ int main(void) {
         assert(discoverController.selectedViewController == discoverControllers[4]);
         assert(NEINGuardVisibleTabSelection(discoverController, 2) == 1);
         assert(discoverController.tabBar.items.count == 5);
+#ifdef NEIN_MULTI_SKIN_THEME
+        CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+        CGContextRef bitmap = CGBitmapContextCreate(NULL, 128, 150, 8, 0, space,
+            kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+        CGColorSpaceRelease(space);
+        CGContextSetRGBFillColor(bitmap, 1, 0, 0, 1);
+        CGContextFillRect(bitmap, CGRectMake(32, 56, 64, 60));
+        CGImageRef padded = CGBitmapContextCreateImage(bitmap);
+        CGImageRef trimmed = NEINCreateTrimmedTabImage(padded);
+        assert(trimmed && CGImageGetWidth(trimmed) == 64 && CGImageGetHeight(trimmed) == 60);
+        CFDataRef trimmedData = CGDataProviderCopyData(CGImageGetDataProvider(trimmed));
+        assert(CFDataGetBytePtr(trimmedData)[3] == 255);
+        CFRelease(trimmedData); CGImageRelease(trimmed); CGImageRelease(padded);
+        CGContextClearRect(bitmap, CGRectMake(0, 0, 128, 150));
+        padded = CGBitmapContextCreateImage(bitmap);
+        assert(!NEINCreateTrimmedTabImage(padded) && !NEINCreateTrimmedTabImage(NULL));
+        CGImageRelease(padded); CGContextRelease(bitmap);
+        TestStylesheet *sheet = [TestStylesheet new];
+        sheet.productID = @"default-theme"; sheet.isDefaultStylesheet = YES;
+        [_TtC17LineSharedUITheme17StylesheetManager sharedManager].currentStylesheet = sheet;
+        UITraitCollection *traits = [UITraitCollection new];
+        traits.userInterfaceStyle = UIUserInterfaceStyleLight;
+        presentation.bar.traitCollection = traits;
+        controller.viewControllers = controllers;
+        NEINUpdateVisibleTabBar(controller);
+        assert([((UIImage *)presentation.bar.items[0].image).name isEqualToString:@"skin-home-light.png"]);
+        assert([((UIImage *)presentation.bar.items[0].selectedImage).name isEqualToString:@"skin-home-on.png"]);
+        assert([((UIImage *)presentation.bar.items[1].image).name isEqualToString:@"skin-chat.png"]);
+        assert([((UIImage *)presentation.bar.items[2].image).name isEqualToString:@"skin-call.png"]);
+        assert([((UIImage *)presentation.bar.items[2].selectedImage).name isEqualToString:@"skin-call-on.png"]);
+        CGSize callSize = ((UIImage *)presentation.bar.items[2].image).size;
+        assert(callSize.width <= 40 && callSize.height <= 28);
+        assert(fabs(callSize.width / callSize.height - 64.0 / 75.0) < 0.0001);
+        assert(presentation.bar.items[3] == presentation.settingsItem);
+        NSString *fallback = NSProcessInfo.processInfo.arguments[1];
+        NSString *role = [fallback isEqualToString:@"legacy-today"] ? @"today" : fallback;
+        NSString *normalName = [role isEqualToString:@"none"]
+            ? @"gearshape" : [NSString stringWithFormat:@"skin-%@.png", role];
+        NSString *selectedName = [role isEqualToString:@"none"]
+            ? @"gearshape.fill" : [NSString stringWithFormat:@"skin-%@-on.png", role];
+        assert([presentation.settingsItem.image.name isEqualToString:normalName]);
+        assert([presentation.settingsItem.selectedImage.name isEqualToString:selectedName]);
+        UIImage *settingsBefore = presentation.settingsItem.image;
+        NEINUpdateVisibleTabBar(controller);
+        assert([presentation.settingsItem.image.name isEqualToString:normalName]);
+        assert(CGSizeEqualToSize(settingsBefore.size, presentation.settingsItem.image.size));
+        nativePresentation.bar.traitCollection = traits;
+        NEINUpdateVisibleTabBar(nativeSettingsController);
+        if ([role isEqualToString:@"none"]) {
+            assert(nativePresentation.bar.items[3].image == nativeSettings.image);
+            nativeSettings.image = nil;
+            NEINUpdateVisibleTabBar(nativeSettingsController);
+        }
+        assert([nativePresentation.bar.items[3].image.name isEqualToString:normalName]);
+        assert([nativePresentation.bar.items[3].selectedImage.name isEqualToString:selectedName]);
+        NSUInteger beforeSkinSettings = settingsOpened;
+        [presentation tabBar:presentation.bar didSelectItem:presentation.settingsItem];
+        assert(settingsOpened == beforeSkinSettings + 1);
+        traits.userInterfaceStyle = UIUserInterfaceStyleDark;
+        NEINUpdateVisibleTabBar(controller);
+        assert([((UIImage *)presentation.bar.items[0].image).name isEqualToString:@"skin-home-dark.png"]);
+        assert([((UIImage *)presentation.bar.items[0].selectedImage).name isEqualToString:@"skin-home-on-dark.png"]);
+        sheet.productID = @"owned-theme"; sheet.isDefaultStylesheet = NO;
+        NEINUpdateVisibleTabBar(controller);
+        assert([((UIImage *)presentation.bar.items[0].image).name isEqualToString:@"skin-home-dark.png"]);
+        sheet.productID = @"another-theme";
+        NEINUpdateVisibleTabBar(controller);
+        assert(presentation.bar.items[0].image == ((UITabBarItem *)items[0]).image);
+        assert([presentation.settingsItem.image.name isEqualToString:@"gearshape"]);
+        assert([presentation.settingsItem.selectedImage.name isEqualToString:@"gearshape.fill"]);
+        [_TtC17LineSharedUITheme17StylesheetManager sharedManager].currentStylesheet = nil;
+        NEINUpdateVisibleTabBar(controller);
+        assert(presentation.bar.items[1].image == ((UITabBarItem *)items[1]).image);
+#endif
         puts("Native tab presentation lifecycle and selection tests passed (view doubles).");
     }
     return 0;
