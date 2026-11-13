@@ -549,6 +549,8 @@ class MainToolTests(unittest.TestCase):
             ('--entry-only', '--remove-ads'),
             ('--entry-only', '--keychain-compat'),
             ('--entry-only', '--iphone-duo'),
+            ('--entry-only', '--skin-theme',
+             'dffa6443-27c7-4361-a481-39750b03b5c5=3cc08ba6-5d04-4c52-ab76-651231ead8ef'),
         ):
             with self.subTest(flags=flags), redirect_stderr(StringIO()), \
                     self.assertRaises(SystemExit):

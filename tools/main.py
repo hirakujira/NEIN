@@ -11,6 +11,7 @@ from io import BytesIO
 import json
 from pathlib import Path
 import plistlib
+import re
 import shutil
 import struct
 import subprocess
@@ -27,6 +28,7 @@ PLIST = analyze_patch_profile.PLIST
 NOP = bytes.fromhex('1f2003d5')
 LIB_NAME = 'NEINHooks.dylib'
 LIB_ENTRY = 'Payload/LINE.app/Frameworks/' + LIB_NAME
+DEFAULT_JSON = 'Payload/LINE.app/default.json'
 LOAD_PATH = '@executable_path/Frameworks/' + LIB_NAME
 APP_ROOT = 'Payload/LINE.app/'
 ICON_PREVIEW_ROOT = APP_ROOT + 'NEINIconPreviews/'
@@ -421,6 +423,8 @@ def parse_args(argv=None):
                         help='Hide VOOM, News, Shopping and Discover tab buttons (verified on 26.14.0; experimental on 26.15.1 and 26.17.0)')
     parser.add_argument('--collapse-friends-on-launch', action='store_true',
                         help='Initialize the Friends section as collapsed')
+    parser.add_argument('--skin-theme', metavar='TARGET_UUID=SOURCE_UUID',
+                        help='Give the target owned theme (e.g. the white theme) the look of the source theme, both while applied and after the system reverts to the default')
     parser.add_argument('--iphone-duo', action='store_true',
                         help="Experimentally mark the app as built with the iOS 27.1 SDK so iPhone Duo uses the full inner display; keeps bars horizontal and shows LINE's two-column layout on the inner display")
     parser.add_argument('--allow-unverified', action='store_true',
@@ -428,6 +432,15 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if args.keychain_compat:
         args.diagnostics = True
+    if args.skin_theme and not args.entry_only:
+        # One-flag skin mode: the seeded target is a theme the account
+        # really owns, so imply only the resign-tested defaults.
+        # --iphone-duo stays opt-in (device-specific).
+        args.keychain_compat = True
+        args.diagnostics = True
+        args.remove_ads = True
+        args.hide_promotional_tabs = True
+        args.collapse_friends_on_launch = True
     if args.entry_only and (args.diagnostics or args.remove_ads or
                             args.hide_promotional_tabs):
         parser.error('--entry-only cannot be combined with diagnostics, compatibility hooks, or ad removal.')
@@ -435,6 +448,12 @@ def parse_args(argv=None):
         parser.error('--entry-only cannot be combined with --primary-login.')
     if args.entry_only and args.iphone_duo:
         parser.error('--entry-only cannot be combined with --iphone-duo.')
+    if args.entry_only and args.skin_theme:
+        parser.error('--entry-only cannot be combined with --skin-theme.')
+    if args.skin_theme:
+        parts = args.skin_theme.split('=')
+        if len(parts) != 2 or not all(UUID_PATTERN.match(p) for p in parts):
+            parser.error(f'Invalid --skin-theme {args.skin_theme!r}: expected TARGET_UUID=SOURCE_UUID')
     if (args.output.exists() or args.output.with_suffix('.manifest.json').exists() or
             args.output.resolve() == args.input.resolve()):
         parser.error('Output and manifest must be new files distinct from the input.')
@@ -480,6 +499,25 @@ def main():
             (None, None) if args.entry_only
             else build_compat_dylib(args, info, profile, domains)
         )
+        skin_default_json = (
+            None if args.entry_only
+            else build_skin_default_json(args.skin_theme, source, build)
+        )
+        if skin_default_json is not None:
+            _, source_id = args.skin_theme.split('=')
+            source_dir = fetch_theme_package(source_id, build / 'packages')
+            # Ship the source skin's images with the bundle twice: under
+            # nein-skin/ (for path-qualified references) and at the app root
+            # (for bare-basename resolution), so the fallback render of the
+            # reskinned default.json can find every referenced asset.
+            for path in sorted((source_dir / 'images').glob('*')):
+                if not path.is_file() or path.name == '.downloaded':
+                    continue
+                data = path.read_bytes()
+                added_members.append(
+                    (f'Payload/LINE.app/nein-skin/{path.name}', data, 0o100644))
+                added_members.append(
+                    (f'Payload/LINE.app/{path.name}', data, 0o100644))
         if lib_data is not None:
             added_members.insert(0, (LIB_ENTRY, lib_data, 0o100755))
         if any(name in names for name, _, _ in added_members):
@@ -503,6 +541,8 @@ def main():
                     target.writestr(copy(entry), modified)
                 elif entry.filename == PLIST:
                     target.writestr(copy(entry), output_info)
+                elif entry.filename == DEFAULT_JSON and skin_default_json is not None:
+                    target.writestr(copy(entry), skin_default_json)
                 else:
                     copy_archive_member(source, target, entry)
             for name, content, mode in added_members:
@@ -523,6 +563,8 @@ def main():
                 expected = (
                     BytesIO(modified) if name == EXECUTABLE else
                     BytesIO(output_info) if name == PLIST else
+                    BytesIO(skin_default_json)
+                    if name == DEFAULT_JSON and skin_default_json is not None else
                     source.open(name)
                 )
                 with expected, target.open(name) as actual:
@@ -576,6 +618,7 @@ def main():
                 'collapse_friends_on_launch': args.collapse_friends_on_launch,
                 'enable_sticker_shop': bool(shop),
                 'enable_theme_shop': bool(theme),
+                'skin_theme': args.skin_theme,
                 'iphone_duo': None,
                 'source_ipa_sha256': digest_file(args.input),
                 'output_ipa_sha256': digest_file(args.output),
@@ -742,6 +785,171 @@ def load_ad_domains(path=AD_DOMAIN_LIST):
     return domains
 
 
+UUID_PATTERN = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+
+
+def theme_package_base_url(product_id):
+    """CDN base for a theme package: the product UUID shards the path."""
+    prefix = product_id.replace('-', '')
+    return (f'https://shop.line-scdn.net/themeshop/v1/products/'
+            f'{prefix[:2]}/{prefix[2:4]}/{prefix[4:6]}/{product_id}')
+
+
+def fetch_theme_package(product_id, cache_dir):
+    """Download a theme package from the public shop CDN and unpack it into
+    {product_id}/ (theme.json + images/). The newest revision present is
+    picked; results are cached so repeated builds stay offline."""
+    import io
+    import re
+    import tarfile
+    import urllib.error
+    import urllib.request
+    import zipfile
+
+    base = theme_package_base_url(product_id)
+    out_dir = cache_dir / product_id
+    marker = out_dir / '.downloaded'
+    if marker.exists():
+        return out_dir
+
+    def cdn_revision_exists(candidate):
+        request = urllib.request.Request(
+            f'{base}/{candidate}/IOS/theme.zip',
+            headers={'Range': 'bytes=0-0'})
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return response.status in (200, 206)
+        except urllib.error.HTTPError:
+            return False  # revision absent from the CDN
+
+    def revision_from_store_page():
+        """The product page's schema.org image URL names a recent revision
+        (e.g. .../<uuid>/312/WEBSTORE/icon.png), so it is a close starting
+        point; walk up from it to the newest revision."""
+        request = urllib.request.Request(
+            f'https://store.line.me/themeshop/product/{product_id}/',
+            headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            html = response.read().decode('utf-8', 'replace')
+        match = re.search(rf'{re.escape(product_id)}/(\d+)/', html)
+        return int(match.group(1)) if match else None
+
+    revision = None
+    try:
+        start = revision_from_store_page()
+    except (urllib.error.URLError, ValueError, OSError):
+        start = None
+    if start is not None and cdn_revision_exists(start):
+        revision = start
+        while cdn_revision_exists(revision + 1):
+            revision += 1
+    if revision is None:
+        # The store page gave no starting point (page absent or its
+        # revision not on the CDN), so probe the full sparse range; the
+        # cache keeps later builds offline.
+        for candidate in range(1, 501):
+            if cdn_revision_exists(candidate):
+                revision = candidate
+    if revision is None:
+        raise SystemExit(
+            f'No theme package for {product_id} on the CDN')
+    zip_path = cache_dir / f'{product_id}.zip'
+    urllib.request.urlretrieve(
+        f'{base}/{revision}/IOS/theme.zip', zip_path)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path) as bundle:
+        bundle.extractall(out_dir)
+    marker.write_text(str(revision))
+    return out_dir
+
+
+def render_skin_theme_header(target_id):
+    """Render the NEINThemeConfig.h skin entry: the seeded directory is the
+    target (an owned theme whose package the app will load on relaunch)."""
+    return (
+        '// Generated by tools/main.py; do not edit.\n'
+        f'static const char *const NEINSkinThemeTarget = "{target_id}";\n'
+    )
+
+
+def build_skin_theme_tar(target_dir, source_dir, tar_path):
+    """Build the embedded tar: the source theme's files with the target's
+    manifest identity, so package version checks see the owned theme and
+    never re-download over the seeded skin."""
+    import io
+    import json
+    import tarfile
+
+    manifest = json.loads((target_dir / 'theme.json').read_text())
+    target_identity = manifest.get('manifest', {})
+    source_theme = json.loads((source_dir / 'theme.json').read_text())
+    source_theme['manifest'] = dict(target_identity)
+    patched = json.dumps(source_theme, ensure_ascii=False,
+                         separators=(',', ':')).encode('utf-8')
+    with tarfile.open(tar_path, 'w', format=tarfile.USTAR_FORMAT) as tar:
+        for path in sorted(source_dir.rglob('*')):
+            if not path.is_file() or path.name == '.downloaded':
+                continue
+            data = (patched if path.name == 'theme.json'
+                    else path.read_bytes())
+            member = tarfile.TarInfo(path.relative_to(source_dir).as_posix())
+            member.size = len(data)
+            member.mode = 0o644
+            tar.addfile(member, io.BytesIO(data))
+    return tar_path
+
+
+def build_skin_default_json(skin_theme, archive, build_dir):
+    """Reskin the bundled default stylesheet: Line Default's rulesets with the
+    source theme's values merged on top, keeping the default's manifest
+    identity. The relaunch fallback chain lands on default.json, so even the
+    reverted state renders the source skin. Token references (@Name) are
+    expanded to the source theme's view.common values because the default
+    sheet's loader only knows the built-in token set."""
+    if not skin_theme or build_dir is None:
+        return None
+    _, source_id = skin_theme.split('=')
+    packages = build_dir / 'packages'
+    source_dir = fetch_theme_package(source_id, packages)
+    raw = archive.read(DEFAULT_JSON).decode('utf-8')
+    try:
+        default = json.loads(raw)
+    except ValueError:
+        # The bundled sheet carries trailing commas; LINE's parser is lenient.
+        default = json.loads(re.sub(r',(\s*[}\]])', r'\1', raw))
+    theme = json.loads((source_dir / 'theme.json').read_text())
+    tokens = theme.get('view.common', {})
+
+    def expand(node):
+        if isinstance(node, dict):
+            return {key: expand(value) for key, value in node.items()}
+        if isinstance(node, list):
+            return [expand(value) for value in node]
+        if isinstance(node, str) and node.startswith('@'):
+            name = node[1:].split(',', 1)[0]
+            # Alpha-suffixed refs keep their original form: the sheet format
+            # has no 8-digit hex precedent, so a guess could break the rule.
+            if name in tokens and ',' not in node[1:]:
+                return tokens[name]
+        if (isinstance(node, str) and '.png' in node and '/' not in node
+                and not node.startswith('@')):
+            # Bare image filenames resolve against the package root when a
+            # theme package is loaded; in the bundle they live under nein-skin/
+            # so the fallback render can find them. A tint suffix stays.
+            head, sep, tail = node.partition(' ')
+            return 'nein-skin/' + head + sep + tail
+        return node
+
+    merged = dict(default)
+    for key, value in theme.items():
+        if key in ('manifest',):
+            continue
+        merged[key] = expand(value)
+    merged['manifest'] = default.get('manifest', {})
+    return json.dumps(merged, ensure_ascii=False,
+                      separators=(',', ':')).encode('utf-8')
+
+
 def build_compat_dylib(args, info, patch_profile, domains):
     features = (
         (args.diagnostics, 'keychain-compat' if args.keychain_compat else 'diagnostics',
@@ -749,6 +957,7 @@ def build_compat_dylib(args, info, patch_profile, domains):
         (args.keychain_compat, None, ['-DNEIN_MULTI_KEYCHAIN_COMPAT=1', '-framework', 'Security']),
         (args.remove_ads, 'noads', ['-DNEIN_MULTI_REMOVE_ADS=1', '-framework', 'WebKit']),
         (args.hide_promotional_tabs, 'no-promotional-tabs', ['-DNEIN_MULTI_HIDE_PROMOTIONAL_TABS=1']),
+        (args.skin_theme, 'skin-themes', ['-DNEIN_MULTI_SKIN_THEME=1']),
         (args.iphone_duo, 'iphone-duo', ['-DNEIN_MULTI_IPHONE_DUO=1']),
         (args.primary_login, 'primary-login', []),
     )
@@ -765,6 +974,23 @@ def build_compat_dylib(args, info, patch_profile, domains):
             analyze_patch_profile.render_c_header(patch_profile.keychain_profile),
             encoding='utf-8',
         )
+    package_flags = []
+    if args.skin_theme:
+        target_id, source_id = args.skin_theme.split('=')
+        (build / 'NEINThemeConfig.h').write_text(
+            render_skin_theme_header(target_id), encoding='utf-8',
+        )
+        packages = build / 'packages'
+        packages.mkdir(parents=True, exist_ok=True)
+        target_dir = fetch_theme_package(target_id, packages)
+        source_dir = fetch_theme_package(source_id, packages)
+        # The cache key is target+source: reusing a tar built for a
+        # different source would seed the previous skin's assets.
+        package_tar = packages / f'{target_id}-{source_id}-skin.tar'
+        if not package_tar.exists():
+            build_skin_theme_tar(target_dir, source_dir, package_tar)
+        package_flags = ['-sectcreate', '__DATA', '__nein_theme_pkg',
+                         str(package_tar)]
     subprocess.run(['xcrun', '--sdk', 'iphoneos', 'clang',
                     '-target', 'arm64-apple-ios' + info['MinimumOSVersion'],
                     '-fobjc-arc', '-fblocks', '-O2', '-Wall', '-Wextra',
@@ -774,6 +1000,7 @@ def build_compat_dylib(args, info, patch_profile, domains):
                     '-framework', 'UIKit', '-framework', 'CoreGraphics',
                     '-I', str(build),
                     '-Wl,-install_name,' + LOAD_PATH,
+                    *package_flags,
                     str(ROOT / 'hooks' / 'NEINHooks.m'), '-o', str(lib)], check=True)
     subprocess.run(['codesign', '--force', '--sign', '-', str(lib)], check=True)
     subprocess.run(['codesign', '--verify', '--strict', str(lib)], check=True)

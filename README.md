@@ -42,6 +42,7 @@ macOS 版請看 [README-macOS.md](README-macOS.md)。
 | `--remove-ads` | 停用廣告載入、隱藏廣告，並封鎖廣告網域（清單見 [`ad_domains.txt`](ad_domains.txt)）。 |
 | `--hide-promotional-tabs` | 隱藏 VOOM、新聞、購物與「逛逛」分頁，並在分頁列加上「設定」。也可以在 5 秒內連點「主頁」10 次開啟設定。 |
 | `--collapse-friends-on-launch` | 首頁的好友區塊預設收合，仍可手動展開。 |
+| `--skin-theme` | 把白色主題替換成指定的主題：格式 `TARGET_UUID=SOURCE_UUID`，套用中與系統退回預設的兩種狀態都渲染指定主題的外觀。 |
 | `--iphone-duo` | 實驗性支援 iPhone Duo：填滿內外螢幕，展開時改用 iPad 版的左右雙欄版面（已實機測試）。 |
 | `--primary-login` | 保留主手機的登入流程，不偽裝成 iPad。 |
 

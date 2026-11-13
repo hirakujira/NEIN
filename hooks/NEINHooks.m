@@ -24,6 +24,9 @@
 #ifdef NEIN_MULTI_REMOVE_ADS
 #include "NEINAdNetworkHooks.m"
 #endif
+#ifdef NEIN_MULTI_SKIN_THEME
+#include "NEINSkinHooks.m"
+#endif
 #ifdef NEIN_MULTI_IPHONE_DUO
 #include "NEINIPhoneDuo.m"
 #endif
@@ -113,6 +116,9 @@ __attribute__((constructor)) static void NEINHooksLoad(void) {
 #endif
 #ifdef NEIN_MULTI_REMOVE_ADS
             NEINInstallAdNetworkBlock();
+#endif
+#ifdef NEIN_MULTI_SKIN_THEME
+            NEINInstallSkinThemeSeeding();
 #endif
 #ifdef NEIN_MULTI_IPHONE_DUO
             NEINInstallIPhoneDuoCompat();
