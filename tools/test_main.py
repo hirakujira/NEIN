@@ -659,6 +659,25 @@ class MainToolTests(unittest.TestCase):
                 self.assertEqual(section['split_layout']['device_model'], 'iPhone19,4')
                 self.assertEqual(section['split_layout']['minimum_window_short_side_points'], 600)
 
+    def test_skin_default_json_prefixes_only_shipped_images(self):
+        source_id = '00000000-0000-0000-0000-000000000002'
+        package = self.directory / 'build' / 'packages' / source_id
+        (package / 'images').mkdir(parents=True)
+        (package / 'images' / 'chat_btn_icon_camera_normal@2x.png').write_bytes(b'png')
+        (package / 'theme.json').write_text(json.dumps({'line.chat.x': {
+            'camera': 'chat_btn_icon_camera_normal.png',
+            'plus': 'chat_btn_icon_plus_normal.png #000000'}}))
+        (package / '.downloaded').write_text('1')
+        with zipfile.ZipFile(self.source, 'w') as archive:
+            archive.writestr(main.DEFAULT_JSON, '{"manifest":{}}')
+        with zipfile.ZipFile(self.source) as archive:
+            sheet = json.loads(main.build_skin_default_json(
+                '00000000-0000-0000-0000-000000000001=' + source_id,
+                archive, self.directory / 'build'))
+        self.assertEqual(sheet['line.chat.x'], {
+            'camera': 'nein-skin/chat_btn_icon_camera_normal.png',
+            'plus': 'chat_btn_icon_plus_normal.png #000000'})
+
     def test_iphone_duo_split_guard_matches_hook(self):
         header = (main.ROOT / 'hooks' / 'NEINDuoSplitLayout.h').read_text(encoding='utf-8')
         self.assertIn('NEINDuoModelIdentifier = @"%s";' % main.IPHONE_DUO_MODEL, header)

@@ -919,6 +919,10 @@ def build_skin_default_json(skin_theme, archive, build_dir):
         default = json.loads(re.sub(r',(\s*[}\]])', r'\1', raw))
     theme = json.loads((source_dir / 'theme.json').read_text())
     tokens = theme.get('view.common', {})
+    # Images the package omits come from the app's Assets.car, which only
+    # resolves the bare name, so only shipped images get the nein-skin/ path.
+    shipped = {re.sub(r'(@\dx)?\.png$', '', path.name)
+               for path in (source_dir / 'images').glob('*.png')}
 
     def expand(node):
         if isinstance(node, dict):
@@ -937,7 +941,8 @@ def build_skin_default_json(skin_theme, archive, build_dir):
             # theme package is loaded; in the bundle they live under nein-skin/
             # so the fallback render can find them. A tint suffix stays.
             head, sep, tail = node.partition(' ')
-            return 'nein-skin/' + head + sep + tail
+            if head[:-len('.png')] in shipped:
+                return 'nein-skin/' + head + sep + tail
         return node
 
     merged = dict(default)
